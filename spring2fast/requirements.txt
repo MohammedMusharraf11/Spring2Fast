@@ -1,0 +1,47 @@
+# ── Core Framework ──
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pydantic-settings
+
+# ── AI / LLM ──
+langchain
+langchain-core
+langchain-text-splitters
+langchain-google-genai
+langchain-groq
+langchain-openai
+langgraph
+langchain-mcp-adapters
+mcp
+
+# ── Java Parsing ──
+javalang
+tree-sitter
+
+# ── Git Operations ──
+gitpython
+
+# ── HTTP / Async ──
+httpx
+aiofiles
+
+# ── Database (for job tracking) ──
+sqlalchemy
+aiosqlite
+
+# ── Utilities ──
+python-dotenv
+loguru
+rich
+
+# ── Code Quality (for validation agent) ──
+black
+ruff
+isort
+
+# ── Testing ──
+pytest
+pytest-asyncio
+httpx

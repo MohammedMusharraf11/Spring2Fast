@@ -38,11 +38,21 @@ class Settings(BaseSettings):
     mcp_docs_server_name: str = "docs"
     mcp_docs_tool_name: str = "search_docs"
 
-    # ── GitHub ──
-    github_token: Optional[str] = None
+    # ── AWS Bedrock ──
+    bedrock_aws_access_key_id: Optional[str] = None
+    bedrock_aws_secret_access_key: Optional[str] = None
+    bedrock_aws_region: str = "us-east-1"  # Llama 4 Maverick available in us-east-1
 
-    # ── Database ──
+    # ── GitHub ──
+    github_token: Optional[str] = None   # Classic PAT with repo scope (GITHUB_TOKEN or GITHUB_PAT)
+    github_pat: Optional[str] = None     # Alias — also accepted as GITHUB_PAT in .env
+
+    # ── Database (legacy SQLite — superseded by Supabase) ──
     database_url: str = "sqlite+aiosqlite:///./spring2fast.db"
+
+    # ── Supabase ──
+    db_url: Optional[str] = None          # Supabase project URL
+    service_role_key: Optional[str] = None  # Supabase service role key
 
     # ── Directories ──
     workspace_dir: str = "./workspace"

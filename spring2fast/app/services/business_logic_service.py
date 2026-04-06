@@ -32,7 +32,7 @@ class BusinessLogicService:
     def __init__(self, enricher: BusinessLogicLLMEnricher | None = None) -> None:
         self.enricher = enricher or BusinessLogicLLMEnricher()
 
-    def extract(self, *, input_dir: str, artifacts_dir: str) -> BusinessLogicResult:
+    async def extract(self, *, input_dir: str, artifacts_dir: str) -> BusinessLogicResult:
         """Extract business rules and write a markdown artifact."""
         source_root = Path(input_dir)
         artifact_dir = Path(artifacts_dir)
@@ -56,7 +56,7 @@ class BusinessLogicService:
             snapshots.append(f"FILE: {file_path.relative_to(source_root)}\n{text[:2500]}")
 
         deduped_rules = self._dedupe_preserve_order(rules)
-        llm_result = self.enricher.enrich(
+        llm_result = await self.enricher.enrich(
             file_snapshot="\n\n".join(snapshots[:6]),
             extracted_rules=deduped_rules[:20],
         )

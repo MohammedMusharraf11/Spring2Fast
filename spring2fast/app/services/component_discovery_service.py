@@ -41,6 +41,13 @@ class ComponentDiscoveryService:
         "configs": ["@Configuration"],
     }
 
+    # JPA repository interfaces that signal a repository without @Repository annotation
+    JPA_REPO_BASES = (
+        "JpaRepository", "CrudRepository",
+        "PagingAndSortingRepository", "Repository",
+        "MongoRepository", "ReactiveCrudRepository",
+    )
+
     def discover(self, *, input_dir: str, artifacts_dir: str) -> ComponentDiscoveryResult:
         """Discover Spring Boot components and write a normalized artifact."""
         source_root = Path(input_dir)
@@ -51,6 +58,10 @@ class ComponentDiscoveryService:
 
         for file_path in source_root.rglob("*.java"):
             if ".git" in file_path.parts:
+                continue
+            # Skip test files — they get misclassified as services/controllers
+            parts_lower = [p.lower() for p in file_path.parts]
+            if "test" in parts_lower or file_path.stem.lower().endswith("test") or file_path.stem.lower().endswith("tests"):
                 continue
             text = file_path.read_text(encoding="utf-8", errors="ignore")
             category = self._classify_component(file_path, text)
@@ -80,6 +91,12 @@ class ComponentDiscoveryService:
     def _classify_component(self, file_path: Path, text: str) -> str | None:
         lowered_path = str(file_path).lower()
         lowered_text = text.lower()
+
+        # ── JPA repository interfaces (no @Repository annotation needed) ──
+        if "interface " in text:
+            for base in self.JPA_REPO_BASES:
+                if f"extends {base}" in text or f"extends {base}<" in text:
+                    return "repositories"
 
         for category, markers in self.CATEGORY_RULES.items():
             for marker in markers:

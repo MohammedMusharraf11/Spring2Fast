@@ -8,10 +8,10 @@ from app.agents.state import MigrationState
 from app.services.business_logic_service import BusinessLogicService
 
 
-def extract_business_logic_node(state: MigrationState) -> MigrationState:
+async def extract_business_logic_node(state: MigrationState) -> MigrationState:
     """Extract business rules and persist them as a markdown artifact."""
     next_state = deepcopy(state)
-    result = BusinessLogicService().extract(
+    result = await BusinessLogicService().extract(
         input_dir=next_state["input_dir"],
         artifacts_dir=next_state["artifacts_dir"],
     )

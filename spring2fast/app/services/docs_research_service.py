@@ -170,7 +170,7 @@ class DocsResearchService:
         self.mcp_research_service = mcp_research_service or MCPResearchService()
         self.enricher = enricher or DocsResearchLLMEnricher()
 
-    def build_references(self, *, technologies: list[str], artifacts_dir: str) -> DocsResearchResult:
+    async def build_references(self, *, technologies: list[str], artifacts_dir: str) -> DocsResearchResult:
         """Create a docs-references artifact for the discovered technology list."""
         references: list[dict[str, str]] = []
         dynamic_candidates: list[dict[str, object]] = []
@@ -202,7 +202,7 @@ class DocsResearchService:
                 }
             )
 
-        for enriched in self.enricher.enrich_batch(candidates=dynamic_candidates):
+        for enriched in await self.enricher.enrich_batch(candidates=dynamic_candidates):
             candidate = next(item for item in dynamic_candidates if item["java_technology"] == enriched["java_technology"])
             static_reference = candidate.get("static_reference")
             if not enriched.get("official_docs") and not static_reference:

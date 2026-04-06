@@ -12,6 +12,7 @@ langchain-text-splitters
 langchain-google-genai
 langchain-groq
 langchain-openai
+langchain-aws
 langgraph
 langchain-mcp-adapters
 mcp
@@ -27,9 +28,8 @@ gitpython
 httpx
 aiofiles
 
-# ── Database (for job tracking) ──
-sqlalchemy
-aiosqlite
+# ── Database (Supabase) ──
+supabase
 
 # ── Utilities ──
 python-dotenv

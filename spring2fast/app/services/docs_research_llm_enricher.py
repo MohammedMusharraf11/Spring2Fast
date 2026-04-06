@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -20,8 +21,8 @@ class DocsResearchLLMEnricher:
     def enabled(self) -> bool:
         return self.model is not None
 
-    def enrich_batch(self, *, candidates: list[dict[str, Any]]) -> list[dict[str, str]]:
-        """Pick the best migration reference candidates for a batch of technologies."""
+    async def enrich_batch(self, *, candidates: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """Pick the best migration reference candidates (async, non-blocking)."""
         if not candidates:
             return []
 
@@ -44,7 +45,22 @@ class DocsResearchLLMEnricher:
             f"Candidates: {json.dumps(candidates, ensure_ascii=False)}\n"
         )
 
-        response = self.model.invoke([HumanMessage(content=prompt)])
+        try:
+            response = await asyncio.wait_for(
+                self.model.ainvoke([HumanMessage(content=prompt)]),
+                timeout=60.0,
+            )
+        except (asyncio.TimeoutError, Exception):
+            return [
+                {
+                    "java_technology": item["java_technology"],
+                    "python_equivalent": (item.get("static_reference") or {}).get("python_equivalent", item["java_technology"]),
+                    "official_docs": (item.get("static_reference") or {}).get("official_docs", ""),
+                    "notes": (item.get("static_reference") or {}).get("notes", "LLM enrichment failed."),
+                }
+                for item in candidates
+            ]
+
         content = response.content if isinstance(response.content, str) else "".join(
             part.get("text", "") for part in response.content if isinstance(part, dict)
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -20,7 +21,7 @@ class TechnologyLLMEnricher:
     def enabled(self) -> bool:
         return self.model is not None
 
-    def enrich(
+    async def enrich(
         self,
         *,
         file_snapshot: str,
@@ -28,7 +29,7 @@ class TechnologyLLMEnricher:
         build_files: list[str],
         java_file_count: int,
     ) -> dict[str, Any]:
-        """Return LLM-enriched technology observations."""
+        """Return LLM-enriched technology observations (async, non-blocking)."""
         if not self.enabled:
             return {"summary": None, "additional_technologies": [], "notes": []}
 
@@ -48,7 +49,14 @@ class TechnologyLLMEnricher:
             f"{file_snapshot}\n"
         )
 
-        response = self.model.invoke([HumanMessage(content=prompt)])
+        try:
+            response = await asyncio.wait_for(
+                self.model.ainvoke([HumanMessage(content=prompt)]),
+                timeout=60.0,
+            )
+        except (asyncio.TimeoutError, Exception):
+            return {"summary": None, "additional_technologies": [], "notes": []}
+
         content = response.content if isinstance(response.content, str) else "".join(
             part.get("text", "") for part in response.content if isinstance(part, dict)
         )

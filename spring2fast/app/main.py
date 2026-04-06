@@ -8,7 +8,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.config import settings
 from app.core.logging import setup_logging
-from app.database import init_db
+from app.core.llm import log_model_routing
+
+
+async def _cleanup_stale_jobs() -> None:
+    """Mark in-flight jobs as failed after server restart."""
+    import asyncio
+    try:
+        from app.supabase_client import get_supabase
+        db = get_supabase()
+        stale_statuses = ["ingesting", "analyzing", "planning", "migrating", "validating"]
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: db.table("migration_jobs")
+                .update({"status": "failed", "error_message": "Server restarted mid-migration"})
+                .in_("status", stale_statuses)
+                .execute()
+        )
+    except Exception:
+        pass  # Non-critical
 
 
 @asynccontextmanager
@@ -16,8 +34,9 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
     # ── Startup ──
     setup_logging()
-    await init_db()
-    settings.workspace_path  # Ensure directories exist
+    log_model_routing()          # Show which LLM is active for each tier
+    await _cleanup_stale_jobs()  # Mark stuck jobs as failed
+    settings.workspace_path      # Ensure directories exist
     settings.output_path
     yield
     # ── Shutdown ──

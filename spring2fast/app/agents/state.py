@@ -10,6 +10,27 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
+# ── Sentinel to distinguish "not provided" from explicit None ──────────────
+_MISSING = object()
+
+
+def _latest_any(a: Any, b: Any) -> Any:
+    """Take b if provided (even if None/empty), else keep a.
+
+    NOTE: Uses _MISSING sentinel — DO NOT use this for subgraph fields
+    that intentionally set None to signal state transitions.
+    """
+    return b if b is not None else a
+
+
+def _always_latest(a: Any, b: Any) -> Any:
+    """Always take b — even if b is None, False, [], {}.
+
+    Required for fields that use None/empty as a meaningful signal
+    (e.g. current_conversion=None means 'queue is empty').
+    """
+    return b
+
 
 def _merge_dicts(a: dict, b: dict) -> dict:
     """Deep-merge two dicts (b wins on conflict)."""
@@ -50,14 +71,14 @@ class MigrationState(TypedDict):
     Fields with Annotated reducers support parallel fan-in from the DAG.
     """
 
-    job_id: str
-    source_type: Literal["github", "upload", "folder"]
-    source_url: str
-    branch: NotRequired[str | None]
-    workspace_dir: str
-    input_dir: NotRequired[str]
-    artifacts_dir: NotRequired[str]
-    output_dir: NotRequired[str]
+    job_id: Annotated[str, _latest_any]
+    source_type: Annotated[Literal["github", "upload", "folder"], _latest_any]
+    source_url: Annotated[str, _latest_any]
+    branch: Annotated[NotRequired[str | None], _latest_any]
+    workspace_dir: Annotated[str, _latest_any]
+    input_dir: Annotated[NotRequired[str], _latest_any]
+    artifacts_dir: Annotated[NotRequired[str], _latest_any]
+    output_dir: Annotated[NotRequired[str], _latest_any]
 
     # ── Progress tracking (use latest/max values) ──
     status: Annotated[str, _latest_str]
@@ -65,32 +86,36 @@ class MigrationState(TypedDict):
     progress_pct: Annotated[int, _latest_int]
 
     # ── Parallel-safe collections (merge on fan-in) ──
-    logs: Annotated[list[str], operator.add]
+    logs: Annotated[list[str], _dedupe_list]
     analysis_artifacts: Annotated[dict[str, str], _merge_dicts]
     discovered_technologies: Annotated[list[str], _dedupe_list]
     business_rules: Annotated[list[str], _dedupe_list]
     generated_files: Annotated[list[str], _dedupe_list]
-    validation_errors: Annotated[list[str], operator.add]
+    validation_errors: Annotated[list[str], _dedupe_list]
     metadata: Annotated[dict[str, Any], _merge_dicts]
 
-    retry_count: int
+    retry_count: Annotated[int, _latest_any]
 
     # ── Contracts ──
-    contracts_dir: NotRequired[str]
-    business_logic_contracts: NotRequired[list[dict[str, str]]]
+    contracts_dir: Annotated[NotRequired[str], _latest_any]
+    business_logic_contracts: Annotated[NotRequired[list[dict[str, str]]], _dedupe_list]
 
     # ── Inter-layer context for LLM synthesis ──
-    existing_generated_code: NotRequired[dict[str, str]]
+    existing_generated_code: Annotated[NotRequired[dict[str, str]], _merge_dicts]
 
     # ── Validation details ──
-    validation_warnings: NotRequired[list[str]]
-    checks_passed: NotRequired[dict[str, bool]]
+    validation_warnings: Annotated[NotRequired[list[str]], _dedupe_list]
+    checks_passed: Annotated[NotRequired[dict[str, bool]], _merge_dicts]
 
     # ── Component inventory ──
-    component_inventory: NotRequired[dict[str, list[dict[str, Any]]]]
+    component_inventory: Annotated[NotRequired[dict[str, list[dict[str, Any]]]], _merge_dicts]
 
     # ── Supervisor subgraph fields ──
-    conversion_queue: NotRequired[list[dict[str, Any]]]
-    completed_conversions: NotRequired[list[dict[str, Any]]]
-    failed_conversions: NotRequired[list[dict[str, Any]]]
-    current_conversion: NotRequired[dict[str, Any] | None]
+    # IMPORTANT: These use _always_latest, NOT _latest_any.
+    # The supervisor sets current_conversion=None and conversion_queue=[]
+    # as meaningful signals. _latest_any would silently ignore None/[]
+    # and keep stale values — causing the supervisor loop to never exit.
+    conversion_queue: Annotated[NotRequired[list[dict[str, Any]]], _always_latest]
+    completed_conversions: Annotated[NotRequired[list[dict[str, Any]]], _always_latest]
+    failed_conversions: Annotated[NotRequired[list[dict[str, Any]]], _always_latest]
+    current_conversion: Annotated[NotRequired[dict[str, Any] | None], _always_latest]

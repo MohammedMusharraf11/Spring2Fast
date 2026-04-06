@@ -165,17 +165,7 @@ from app.agents.migration_subgraph.graph import build_migration_subgraph
 
 
 def condition_after_validate(state: MigrationState) -> str:
-    """After full-pipeline validation: pass → assemble, fail → retry migrate."""
-    errors = state.get("validation_errors", [])
-    retry_count = state.get("retry_count", 0)
-
-    if not errors:
-        return "assemble"
-
-    if retry_count < 3:
-        return "migrate"
-
-    # Max retries — proceed to assemble with whatever we have
+    """After validation: always assemble — errors are logged, not re-migrated."""
     return "assemble"
 
 
@@ -220,10 +210,9 @@ def build_migration_graph():
     builder.add_edge("plan", "migrate")
     builder.add_edge("migrate", "validate")
 
-    # Validate → assemble (pass) or → migrate (retry)
+    # Always assemble after validate
     builder.add_conditional_edges("validate", condition_after_validate, {
         "assemble": "assemble",
-        "migrate": "migrate",
     })
     builder.add_edge("assemble", END)
 

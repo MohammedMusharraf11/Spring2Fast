@@ -8,12 +8,12 @@ from app.agents.state import MigrationState
 from app.services.migration_planning_service import MigrationPlanningService
 
 
-def plan_migration_node(state: MigrationState) -> MigrationState:
+async def plan_migration_node(state: MigrationState) -> MigrationState:
     """Generate a migration plan and build the per-component conversion queue."""
     next_state = deepcopy(state)
     docs_references = next_state.get("metadata", {}).get("docs_research", {}).get("references", [])
 
-    result = MigrationPlanningService().create_plan(
+    result = await MigrationPlanningService().create_plan(
         artifacts_dir=next_state["artifacts_dir"],
         discovered_technologies=next_state["discovered_technologies"],
         business_rules=next_state["business_rules"],

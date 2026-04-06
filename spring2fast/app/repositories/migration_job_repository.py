@@ -1,19 +1,28 @@
-"""Persistence helpers for migration job progress."""
+"""Persistence helpers for migration job progress — backed by Supabase."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from app.supabase_client import get_supabase
 
-from app.models.db_models import JobStatus, MigrationJob
+TABLE = "migration_jobs"
 
 
 class MigrationJobRepository:
-    """Encapsulates job progress persistence operations."""
+    """Encapsulates job progress persistence via Supabase."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self.session_factory = session_factory
+    def __init__(self) -> None:
+        self.db = get_supabase()
+
+    # ── Internal helpers ──────────────────────────────────────────────
+
+    def _update(self, job_id: str, payload: dict[str, Any]) -> None:
+        """Synchronous upsert helper (Supabase py client is sync)."""
+        self.db.table(TABLE).update(payload).eq("id", job_id).execute()
+
+    # ── Public API ────────────────────────────────────────────────────
 
     async def update_progress(
         self,
@@ -26,19 +35,22 @@ class MigrationJobRepository:
         output_path: str | None = None,
         completed_at: datetime | None = None,
     ) -> None:
-        async with self.session_factory() as session:
-            job = await session.get(MigrationJob, job_id)
-            if job is None:
-                raise ValueError(f"Migration job not found: {job_id}")
+        """Update job progress fields in Supabase (called from async context)."""
+        import asyncio
 
-            job.status = JobStatus(status)
-            job.current_step = current_step
-            if progress_pct is not None:
-                job.progress_pct = progress_pct
-            job.error_message = error_message
-            if output_path is not None:
-                job.output_path = output_path
-            if completed_at is not None:
-                job.completed_at = completed_at
+        payload: dict[str, Any] = {
+            "status": status,
+            "current_step": current_step,
+            "error_message": error_message,
+        }
+        if progress_pct is not None:
+            payload["progress_pct"] = progress_pct
+        if output_path is not None:
+            payload["output_path"] = output_path
+        if completed_at is not None:
+            payload["completed_at"] = completed_at.isoformat()
 
-            await session.commit()
+        # Run the sync Supabase call in a thread so we don't block the event loop
+        await asyncio.get_event_loop().run_in_executor(
+            None, self._update, job_id, payload
+        )

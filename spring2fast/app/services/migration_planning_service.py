@@ -24,7 +24,7 @@ class MigrationPlanningService:
     def __init__(self, enricher: PlanningLLMEnricher | None = None) -> None:
         self.enricher = enricher or PlanningLLMEnricher()
 
-    def create_plan(
+    async def create_plan(
         self,
         *,
         artifacts_dir: str,
@@ -46,7 +46,7 @@ class MigrationPlanningService:
             discovered_technologies=discovered_technologies,
             business_rules=business_rules,
         )
-        llm_result = self.enricher.enrich(
+        llm_result = await self.enricher.enrich(
             discovered_technologies=discovered_technologies,
             business_rules=business_rules,
             docs_references=docs_references,

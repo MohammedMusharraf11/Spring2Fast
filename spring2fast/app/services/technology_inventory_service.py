@@ -53,7 +53,7 @@ class TechnologyInventoryService:
     def __init__(self, enricher: TechnologyLLMEnricher | None = None) -> None:
         self.enricher = enricher or TechnologyLLMEnricher()
 
-    def scan_project(self, *, input_dir: str, artifacts_dir: str) -> TechnologyInventoryResult:
+    async def scan_project(self, *, input_dir: str, artifacts_dir: str) -> TechnologyInventoryResult:
         """Scan a project tree and write a markdown inventory artifact."""
         source_root = Path(input_dir)
         artifact_dir = Path(artifacts_dir)
@@ -66,7 +66,7 @@ class TechnologyInventoryService:
         java_file_count = len(list(source_root.rglob("*.java")))
         notes = self._build_notes(source_root, build_files, java_file_count)
         file_snapshot = self._build_file_snapshot(source_root)
-        llm_result = self.enricher.enrich(
+        llm_result = await self.enricher.enrich(
             file_snapshot=file_snapshot,
             detected_technologies=technologies,
             build_files=build_files,

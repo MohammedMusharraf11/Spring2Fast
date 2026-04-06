@@ -8,10 +8,10 @@ from app.agents.state import MigrationState
 from app.services.docs_research_service import DocsResearchService
 
 
-def research_docs_node(state: MigrationState) -> MigrationState:
+async def research_docs_node(state: MigrationState) -> MigrationState:
     """Map discovered technologies to official Python-equivalent docs."""
     next_state = deepcopy(state)
-    result = DocsResearchService().build_references(
+    result = await DocsResearchService().build_references(
         technologies=next_state["discovered_technologies"],
         artifacts_dir=next_state["artifacts_dir"],
     )

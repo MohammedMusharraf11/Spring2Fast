@@ -8,11 +8,11 @@ from app.agents.state import MigrationState
 from app.services.technology_inventory_service import TechnologyInventoryService
 
 
-def tech_discover_node(state: MigrationState) -> MigrationState:
+async def tech_discover_node(state: MigrationState) -> MigrationState:
     """Scan the ingested project and persist a technology inventory artifact."""
     next_state = deepcopy(state)
     service = TechnologyInventoryService()
-    result = service.scan_project(
+    result = await service.scan_project(
         input_dir=next_state["input_dir"],
         artifacts_dir=next_state["artifacts_dir"],
     )

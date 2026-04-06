@@ -15,6 +15,7 @@ catching ~80% of issues without the expensive full-pipeline retry.
 from __future__ import annotations
 
 import ast
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -245,13 +246,22 @@ class BaseConverterAgent:
                 SystemMessage(content=(
                     "You are an expert migration architect converting Java Spring Boot "
                     "to Python FastAPI. Output ONLY valid Python code. "
-                    "No markdown fences, no explanations, no commentary."
+                    "No markdown fences, no explanations, no commentary. "
+                    "IMPORTANT: The Python package root is 'app'. "
+                    "All internal imports MUST use 'from app.' or 'import app.'. "
+                    "NEVER use placeholder names like 'yourapp', 'myapp', 'project', or 'src' in imports."
                 )),
                 HumanMessage(content=prompt),
             ])
             content = response.content if isinstance(response.content, str) else str(response.content)
-            return self._strip_fences(content)
+            return self._strip_fences(self._sanitize_imports(content))
+        except asyncio.CancelledError:
+            # Groq/API rate limit retry was cancelled — don't crash the pipeline
+            return f"# LLM call cancelled (rate limit/timeout) — manual conversion needed\npass\n"
         except Exception as e:
+            error_str = str(e).lower()
+            if "rate" in error_str or "429" in error_str or "quota" in error_str:
+                return f"# LLM rate limited: {e!s}\n# TODO: Retry later or switch LLM provider\npass\n"
             return f"# LLM generation failed: {e!s}\npass\n"
 
     async def _fix_code(self, broken_code: str, error: str) -> str:
@@ -279,6 +289,20 @@ class BaseConverterAgent:
             else:
                 fixed.append(line)
         return "\n".join(fixed)
+
+    @staticmethod
+    def _sanitize_imports(code: str) -> str:
+        """Replace placeholder package names with the real 'app' package."""
+        import re
+        placeholders = ["yourapp", "myapp", "your_app", "my_app", "application", "project"]
+        for placeholder in placeholders:
+            # Replace in import statements only
+            code = re.sub(
+                rf'\b{re.escape(placeholder)}\b',
+                'app',
+                code,
+            )
+        return code
 
     @staticmethod
     def _strip_fences(content: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -20,8 +21,8 @@ class BusinessLogicLLMEnricher:
     def enabled(self) -> bool:
         return self.model is not None
 
-    def enrich(self, *, file_snapshot: str, extracted_rules: list[str]) -> dict[str, Any]:
-        """Return an optional business-logic summary."""
+    async def enrich(self, *, file_snapshot: str, extracted_rules: list[str]) -> dict[str, Any]:
+        """Return an optional business-logic summary (async, non-blocking)."""
         if not self.enabled:
             return {"summary": None, "additional_rules": []}
 
@@ -38,7 +39,14 @@ class BusinessLogicLLMEnricher:
             f"{file_snapshot}\n"
         )
 
-        response = self.model.invoke([HumanMessage(content=prompt)])
+        try:
+            response = await asyncio.wait_for(
+                self.model.ainvoke([HumanMessage(content=prompt)]),
+                timeout=60.0,
+            )
+        except (asyncio.TimeoutError, Exception):
+            return {"summary": None, "additional_rules": []}
+
         content = response.content if isinstance(response.content, str) else "".join(
             part.get("text", "") for part in response.content if isinstance(part, dict)
         )

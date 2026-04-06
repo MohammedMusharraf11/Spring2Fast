@@ -6,6 +6,7 @@ and updates the migration state with the results.
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from typing import Any
 
@@ -18,6 +19,32 @@ from app.agents.converter_agents.controller_converter import controller_converte
 from app.agents.converter_agents.exception_converter import exception_converter_agent
 
 
+async def _push_progress(state: MigrationState) -> None:
+    """Push per-component progress to Supabase so the frontend stays live."""
+    job_id = state.get("job_id")
+    if not job_id:
+        return
+    try:
+        from app.supabase_client import get_supabase
+        completed = len(state.get("completed_conversions", []))
+        failed = len(state.get("failed_conversions", []))
+        remaining = len(state.get("conversion_queue", []))
+        total = completed + failed + remaining
+        # Migration phase spans 60–92% of overall progress
+        pct = 60 + int(32 * (completed + failed) / max(total, 1))
+        db = get_supabase()
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: db.table("migration_jobs").update({
+                "status": "migrating",
+                "current_step": state.get("current_step", "Converting components..."),
+                "progress_pct": pct,
+            }).eq("id", job_id).execute(),
+        )
+    except Exception:
+        pass  # Non-critical — never crash the pipeline
+
+
 async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
     """Shared logic: invoke a converter agent and capture its result in state."""
     next_state = deepcopy(state)
@@ -26,6 +53,14 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
         return next_state
 
     component = current.get("component", {})
+
+    # ── Throttle: only needed for Groq (30 RPM limit). Bedrock has no RPM cap. ──
+    from app.core.llm import _bedrock_model as _check_bedrock
+    using_bedrock = bool(
+        __import__("app.config", fromlist=["settings"]).settings.bedrock_aws_access_key_id
+    )
+    if not using_bedrock:
+        await asyncio.sleep(3.0)  # 3s = 20 req/min, safely under Groq's 30 RPM
 
     result = await agent.convert(
         component=component,
@@ -60,6 +95,10 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
         ]
 
     next_state["current_conversion"] = None
+
+    # ── Push live progress to Supabase after every converted component ──
+    await _push_progress(next_state)
+
     return next_state
 
 

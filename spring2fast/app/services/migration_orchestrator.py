@@ -15,7 +15,6 @@ from pathlib import Path
 from app.agents.graph import build_migration_graph
 from app.agents.state import MigrationState
 from app.config import settings
-from app.database import async_session
 from app.repositories.migration_job_repository import MigrationJobRepository
 
 
@@ -24,7 +23,7 @@ class MigrationOrchestrator:
 
     def __init__(self) -> None:
         self.graph = build_migration_graph()
-        self.job_repository = MigrationJobRepository(async_session)
+        self.job_repository = MigrationJobRepository()
 
     def _persist_state(self, state: MigrationState) -> None:
         """Persist the current migration state to a JSON file for frontend access."""
@@ -91,24 +90,30 @@ class MigrationOrchestrator:
         last_state = initial_state
 
         try:
-            # Hook: persist state + update DB after every node completes
-            async def _on_node_done(node_name: str, state: dict) -> None:
-                nonlocal last_state
-                last_state = state
-                self._persist_state(state)
-                await self.job_repository.update_progress(
-                    job_id=job_id,
-                    status=state.get("status", "ingesting"),
-                    current_step=state.get("current_step", node_name),
-                    progress_pct=state.get("progress_pct", 0),
-                )
-
-            if hasattr(self.graph, "on_node_complete"):
-                self.graph.on_node_complete = _on_node_done
-
-            # Delegate fully to the compiled graph.
-            final_state = await self.graph.ainvoke(initial_state)
-            last_state = final_state
+            # Use astream to get per-node state updates (works with real LangGraph).
+            # This lets us persist state + update DB after every node completes,
+            # giving the frontend real-time progress updates.
+            try:
+                async for chunk in self.graph.astream(
+                    initial_state,
+                    stream_mode="values",
+                    config={"recursion_limit": 200},
+                ):
+                    # Each chunk is the full state after a node completes
+                    if isinstance(chunk, dict):
+                        last_state = chunk
+                        self._persist_state(chunk)
+                        await self.job_repository.update_progress(
+                            job_id=job_id,
+                            status=chunk.get("status", "ingesting"),
+                            current_step=chunk.get("current_step", "Processing..."),
+                            progress_pct=chunk.get("progress_pct", 0),
+                        )
+                final_state = last_state
+            except (NotImplementedError, TypeError, AttributeError):
+                # Fallback for graph implementations without astream
+                final_state = await self.graph.ainvoke(initial_state)
+                last_state = final_state
 
             # Persist final state
             self._persist_state(final_state)

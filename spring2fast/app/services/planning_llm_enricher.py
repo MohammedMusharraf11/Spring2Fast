@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -20,7 +21,7 @@ class PlanningLLMEnricher:
     def enabled(self) -> bool:
         return self.model is not None
 
-    def enrich(
+    async def enrich(
         self,
         *,
         discovered_technologies: list[str],
@@ -28,7 +29,7 @@ class PlanningLLMEnricher:
         docs_references: list[dict[str, str]],
         target_files: list[str],
     ) -> dict[str, Any]:
-        """Return plan refinements from the LLM."""
+        """Return plan refinements from the LLM (async, non-blocking)."""
         if not self.enabled:
             return {"implementation_steps": [], "risk_items": [], "target_files": []}
 
@@ -42,7 +43,16 @@ class PlanningLLMEnricher:
             f"Current target files: {target_files}\n"
         )
 
-        response = self.model.invoke([HumanMessage(content=prompt)])
+        try:
+            response = await asyncio.wait_for(
+                self.model.ainvoke([HumanMessage(content=prompt)]),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            return {"implementation_steps": [], "risk_items": [], "target_files": []}
+        except Exception:
+            return {"implementation_steps": [], "risk_items": [], "target_files": []}
+
         content = response.content if isinstance(response.content, str) else "".join(
             part.get("text", "") for part in response.content if isinstance(part, dict)
         )

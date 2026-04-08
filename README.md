@@ -170,8 +170,9 @@ Tested against `gothinkster/spring-boot-realworld-example-app`:
 
 ## 👤 Author
 
-**Mohammed Musharraf**
-Building at the intersection of AI and developer tooling.
+-- **Mohammed Musharraf**
+-- **Mohit Kumar**
+-- **Shazi ul Islam**
 
 ---
 

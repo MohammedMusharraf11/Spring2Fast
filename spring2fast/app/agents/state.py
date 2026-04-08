@@ -102,6 +102,7 @@ class MigrationState(TypedDict):
 
     # ── Inter-layer context for LLM synthesis ──
     existing_generated_code: Annotated[NotRequired[dict[str, str]], _merge_dicts]
+    output_registry: Annotated[NotRequired[dict[str, str]], _merge_dicts]
 
     # ── Validation details ──
     validation_warnings: Annotated[NotRequired[list[str]], _dedupe_list]

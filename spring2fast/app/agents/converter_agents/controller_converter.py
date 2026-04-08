@@ -38,7 +38,8 @@ class ControllerConverterAgent(BaseConverterAgent):
             template = template_path.read_text(encoding="utf-8")
         else:
             template = (
-                "Convert this Java @RestController to a FastAPI APIRouter.\n\n"
+                "Convert this Java Spring controller to a FastAPI APIRouter.\n"
+                "If it is an MVC controller that returns views, redesign it as a REST API that returns the underlying data as JSON instead of rendering templates.\n\n"
                 "### JAVA SOURCE\n{java_source}\n\n"
                 "### CONTRACT\n{contract_md}\n\n"
                 "### EXISTING SERVICES\n{existing_services}\n\n"

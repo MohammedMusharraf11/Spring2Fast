@@ -3,9 +3,38 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 
 from app.agents.state import MigrationState
 from app.services.migration_planning_service import MigrationPlanningService
+
+
+def _to_snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _predicted_output_path(component_type: str, component: dict) -> str:
+    class_name = str(component.get("class_name", "component"))
+    snake = _to_snake(class_name.removesuffix("Impl"))
+    if component_type == "model":
+        return f"app/models/{snake}.py"
+    if component_type == "schema":
+        return f"app/schemas/{snake}.py"
+    if component_type == "repo":
+        return f"app/repositories/{snake}.py"
+    if component_type == "service":
+        return f"app/services/{snake}.py"
+    if component_type == "controller":
+        return f"app/api/v1/endpoints/{snake}.py"
+    if component_type == "exception_handler":
+        return f"app/api/v1/endpoints/{snake}.py"
+    if component_type == "feign_client":
+        return f"app/clients/{snake}.py"
+    if component_type == "event_consumer":
+        return f"app/consumers/{snake}_consumer.py"
+    if component_type == "scheduled_task":
+        return "app/scheduler.py"
+    return ""
 
 
 async def plan_migration_node(state: MigrationState) -> MigrationState:
@@ -27,30 +56,53 @@ async def plan_migration_node(state: MigrationState) -> MigrationState:
         inventory = next_state.get("metadata", {}).get("component_inventory", {})
 
     queue: list[dict] = []
+    output_registry: dict[str, str] = {}
 
     # 1. Models first (no dependencies)
     for entity in inventory.get("entities", []):
         queue.append({"type": "model", "component": entity, "status": "pending"})
+        output_registry[entity["class_name"]] = _predicted_output_path("model", entity)
 
     # 2. Schemas second (depend on models for type references)
     for dto in inventory.get("dtos", []):
         queue.append({"type": "schema", "component": dto, "status": "pending"})
+        output_registry[dto["class_name"]] = _predicted_output_path("schema", dto)
 
     # 3. Repositories third (depend on models)
     for repo in inventory.get("repositories", []):
         queue.append({"type": "repo", "component": repo, "status": "pending"})
+        output_registry[repo["class_name"]] = _predicted_output_path("repo", repo)
 
     # 4. Services fourth (depend on models + schemas + repos)
     for svc in inventory.get("services", []):
         queue.append({"type": "service", "component": svc, "status": "pending"})
+        output_registry[svc["class_name"]] = _predicted_output_path("service", svc)
 
     # 5. Controllers (depend on services + schemas)
     for ctrl in inventory.get("controllers", []):
         queue.append({"type": "controller", "component": ctrl, "status": "pending"})
+        output_registry[ctrl["class_name"]] = _predicted_output_path("controller", ctrl)
 
     # 6. Exception handlers (depend on nothing, but run after controllers)
     for eh in inventory.get("exception_handlers", []):
         queue.append({"type": "exception_handler", "component": eh, "status": "pending"})
+        output_registry[eh["class_name"]] = _predicted_output_path("exception_handler", eh)
+
+    for client in inventory.get("feign_clients", []):
+        queue.append({"type": "feign_client", "component": client, "status": "pending"})
+        output_registry[client["class_name"]] = _predicted_output_path("feign_client", client)
+
+    for consumer in inventory.get("event_handlers", []):
+        queue.append({"type": "event_consumer", "component": consumer, "status": "pending"})
+        output_registry[consumer["class_name"]] = _predicted_output_path("event_consumer", consumer)
+
+    if inventory.get("scheduled_tasks"):
+        scheduler_component = {
+            "class_name": "ApplicationScheduler",
+            "tasks": inventory.get("scheduled_tasks", []),
+        }
+        queue.append({"type": "scheduled_task", "component": scheduler_component, "status": "pending"})
+        output_registry[scheduler_component["class_name"]] = _predicted_output_path("scheduled_task", scheduler_component)
 
     # 7. Config files (deterministic, handles settings/db/deps)
     queue.append({
@@ -85,5 +137,6 @@ async def plan_migration_node(state: MigrationState) -> MigrationState:
     next_state["failed_conversions"] = []
     next_state["current_conversion"] = None
     next_state["existing_generated_code"] = {}
+    next_state["output_registry"] = output_registry
 
     return next_state

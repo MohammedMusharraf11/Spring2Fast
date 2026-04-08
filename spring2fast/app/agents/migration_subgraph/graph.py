@@ -83,6 +83,9 @@ from app.agents.migration_subgraph.converter_nodes import (
     service_converter_node,
     controller_converter_node,
     exception_converter_node,
+    feign_converter_node,
+    event_consumer_converter_node,
+    scheduler_converter_node,
     config_converter_node,
 )
 
@@ -99,6 +102,9 @@ def build_migration_subgraph():
     builder.add_node("service_converter", service_converter_node)
     builder.add_node("controller_converter", controller_converter_node)
     builder.add_node("exception_converter", exception_converter_node)
+    builder.add_node("feign_converter", feign_converter_node)
+    builder.add_node("event_consumer_converter", event_consumer_converter_node)
+    builder.add_node("scheduler_converter", scheduler_converter_node)
     builder.add_node("config_converter", config_converter_node)
     builder.add_node("quality_gate", quality_gate_node)
 
@@ -113,6 +119,9 @@ def build_migration_subgraph():
         "service_converter": "service_converter",
         "controller_converter": "controller_converter",
         "exception_converter": "exception_converter",
+        "feign_converter": "feign_converter",
+        "event_consumer_converter": "event_consumer_converter",
+        "scheduler_converter": "scheduler_converter",
         "config_converter": "config_converter",
         "quality_gate": "quality_gate",
     })
@@ -121,6 +130,7 @@ def build_migration_subgraph():
     for converter in [
         "model_converter", "schema_converter", "repo_converter",
         "service_converter", "controller_converter", "exception_converter",
+        "feign_converter", "event_consumer_converter", "scheduler_converter",
         "config_converter",
     ]:
         builder.add_edge(converter, "supervisor")

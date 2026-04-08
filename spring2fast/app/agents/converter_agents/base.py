@@ -14,7 +14,6 @@ catching ~80% of issues without the expensive full-pipeline retry.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import re
 from pathlib import Path
@@ -89,6 +88,7 @@ class BaseConverterAgent:
         artifacts_dir: str,
         discovered_technologies: list[str],
         existing_code: dict[str, str],
+        output_registry: dict[str, str],
     ) -> ConversionResult:
         """Run the full conversion loop for a single component."""
         class_name = str(component.get("class_name", "Unknown"))
@@ -111,11 +111,19 @@ class BaseConverterAgent:
             java_ir = tools.parse_java_to_ir(java_source, file_path)
 
             # ── Step 4: Try Tier 1 deterministic conversion ──
-            deterministic_code = tools.deterministic_convert(component_type, java_ir)
+            deterministic_code = self._deterministic_convert(
+                component=component,
+                java_ir=java_ir,
+                java_source=java_source,
+            )
             if deterministic_code:
                 syntax_check = tools.validate_syntax(deterministic_code)
                 if syntax_check["valid"]:
                     output_path = self._get_output_path(component)
+                    deterministic_code = self._resolve_imports(
+                        deterministic_code,
+                        output_registry=output_registry,
+                    )
                     tools.write_output(output_path, deterministic_code, output_dir)
                     result.output_path = output_path
                     result.code = deterministic_code
@@ -166,11 +174,41 @@ class BaseConverterAgent:
 
                 # Check imports
                 import_check = tools.check_imports(code, output_dir)
-                if not import_check["valid"] and attempt < self.MAX_INNER_RETRIES:
-                    code = self._fix_imports(code, import_check["unresolved"])
+                if not import_check["valid"]:
+                    code = self._resolve_imports(
+                        code,
+                        output_registry=output_registry,
+                        unresolved=import_check["unresolved"],
+                    )
+
+                # ── Check for stub/empty method bodies (SFS fix) ──
+                if component_type in ("service", "controller", "repo"):
+                    stub_methods = self._has_stub_methods(code)
+                    if stub_methods:
+                        if attempt < self.MAX_INNER_RETRIES:
+                            error_msg = (
+                                "INCOMPLETE: These methods have empty or stub bodies: "
+                                + ", ".join(stub_methods)
+                                + ". Re-implement them with real logic from the Java source and contract. "
+                                  "Every method must contain working business logic, repository queries, "
+                                  "or controller/service wiring. Do not use pass, return None, "
+                                  "raise NotImplementedError, TODOs, or placeholder comments."
+                            )
+                            code = await self._fix_code(code, error_msg)
+                            continue
+                        result.error = (
+                            "Incomplete implementation: stub methods remain after retries: "
+                            + ", ".join(stub_methods)
+                        )
+                        result.code = code
+                        break
 
                 # Passed inner validation
                 output_path = self._get_output_path(component)
+                code = self._resolve_imports(
+                    code,
+                    output_registry=output_registry,
+                )
                 tools.write_output(output_path, code, output_dir)
                 result.output_path = output_path
                 result.code = code
@@ -207,6 +245,15 @@ class BaseConverterAgent:
         component: dict[str, Any],
     ) -> str:
         raise NotImplementedError
+
+    def _deterministic_convert(
+        self,
+        *,
+        component: dict[str, Any],
+        java_ir: dict[str, Any],
+        java_source: str,
+    ) -> str | None:
+        return tools.deterministic_convert(self._get_component_type(), java_ir)
 
     # ─────────────────────────────────────────
     # Shared LLM helpers
@@ -257,7 +304,7 @@ class BaseConverterAgent:
             return self._strip_fences(self._sanitize_imports(content))
         except asyncio.CancelledError:
             # Groq/API rate limit retry was cancelled — don't crash the pipeline
-            return f"# LLM call cancelled (rate limit/timeout) — manual conversion needed\npass\n"
+            return "# LLM call cancelled (rate limit/timeout) — manual conversion needed\npass\n"
         except Exception as e:
             error_str = str(e).lower()
             if "rate" in error_str or "429" in error_str or "quota" in error_str:
@@ -265,12 +312,17 @@ class BaseConverterAgent:
             return f"# LLM generation failed: {e!s}\npass\n"
 
     async def _fix_code(self, broken_code: str, error: str) -> str:
-        """Ask LLM to fix a syntax error."""
+        """Ask LLM to fix syntax or completeness issues."""
         if not self.llm:
             return broken_code
         try:
             response = await self.llm.ainvoke([
-                SystemMessage(content="Fix the Python syntax error. Return ONLY valid Python code."),
+                SystemMessage(content=(
+                    "Fix the Python code and return ONLY valid Python code. "
+                    "Preserve all methods. If the error mentions incomplete or stub "
+                    "implementations, replace every stub with a real implementation "
+                    "grounded in the existing code and Java source intent."
+                )),
                 HumanMessage(content=f"ERROR: {error}\n\nCODE:\n{broken_code}"),
             ])
             content = response.content if isinstance(response.content, str) else str(response.content)
@@ -279,15 +331,64 @@ class BaseConverterAgent:
             return broken_code
 
     @staticmethod
-    def _fix_imports(code: str, unresolved: list[str]) -> str:
-        """Comment out unresolved imports."""
+    def _resolve_imports(
+        code: str,
+        *,
+        output_registry: dict[str, str],
+        unresolved: list[str] | None = None,
+    ) -> str:
+        """Resolve internal imports against the generated output registry.
+
+        Falls back to commenting the import only when the imported symbol does
+        not exist anywhere in the known registry.
+        """
+        unresolved = unresolved or []
         lines = code.split("\n")
         fixed: list[str] = []
+
         for line in lines:
-            if any(u in line for u in unresolved) and ("import " in line):
-                fixed.append(f"# FIXME: unresolved — {line}")
-            else:
+            stripped = line.strip()
+            if "import " not in stripped or not (stripped.startswith("from ") or stripped.startswith("import ")):
                 fixed.append(line)
+                continue
+
+            updated = line
+            from_match = re.match(r"^(\s*)from\s+([A-Za-z0-9_\.]+)\s+import\s+(.+)$", line)
+            if from_match:
+                indent, module, imported = from_match.groups()
+                imported_names = [
+                    part.split(" as ")[0].strip()
+                    for part in imported.split(",")
+                    if part.strip() and part.strip() != "*"
+                ]
+                replacement_module = module
+                for imported_name in imported_names:
+                    target = output_registry.get(imported_name)
+                    if target:
+                        replacement_module = target.removesuffix(".py").replace("/", ".")
+                        break
+
+                if replacement_module != module:
+                    updated = f"{indent}from {replacement_module} import {imported}"
+                elif any(item == module or item in line for item in unresolved):
+                    missing = [name for name in imported_names if name not in output_registry]
+                    if missing:
+                        updated = f"{indent}# FIXME: unresolved - {stripped}"
+
+            import_match = re.match(r"^(\s*)import\s+([A-Za-z0-9_\.]+)(\s+as\s+\w+)?$", line)
+            if import_match:
+                indent, module, alias = import_match.groups()
+                module_name = module.split(".")[-1]
+                class_like = "".join(part.capitalize() for part in module_name.split("_"))
+                target = output_registry.get(class_like)
+                if target:
+                    replacement_module = target.removesuffix(".py").replace("/", ".")
+                    updated = f"{indent}import {replacement_module}{alias or ''}"
+                elif any(item == module or item in line for item in unresolved):
+                    updated = f"{indent}# FIXME: unresolved - {stripped}"
+
+            fixed.append(updated)
+
         return "\n".join(fixed)
 
     @staticmethod
@@ -303,6 +404,55 @@ class BaseConverterAgent:
                 code,
             )
         return code
+
+    @staticmethod
+    def _has_stub_methods(code: str) -> list[str]:
+        """Return names of methods whose bodies are pure stubs (pass / return None / raise NotImplementedError).
+
+        Used by the inner validation loop to force LLM retry when generated code
+        has correct syntax but empty implementations — which would tank the SFS score.
+        """
+        import ast as _ast
+
+        stubs: list[str] = []
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError:
+            return []
+
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            body = list(node.body)
+            # Strip leading docstring
+            if body and isinstance(body[0], _ast.Expr) and isinstance(body[0].value, _ast.Constant):
+                body = body[1:]
+
+            if not body:
+                stubs.append(node.name)
+                continue
+
+            def _is_stub_stmt(stmt: _ast.stmt) -> bool:
+                if isinstance(stmt, _ast.Pass):
+                    return True
+                if isinstance(stmt, _ast.Return) and (
+                    stmt.value is None
+                    or (isinstance(stmt.value, _ast.Constant) and stmt.value.value is None)
+                ):
+                    return True
+                if isinstance(stmt, _ast.Raise) and stmt.exc is not None:
+                    try:
+                        unparsed = _ast.unparse(stmt.exc)
+                        if "NotImplementedError" in unparsed or "NotImplemented" in unparsed:
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+            if all(_is_stub_stmt(s) for s in body):
+                stubs.append(node.name)
+
+        return stubs
 
     @staticmethod
     def _strip_fences(content: str) -> str:
@@ -434,4 +584,3 @@ class BaseConverterAgent:
             ])
 
         return "\n".join(lines) + "\n"
-

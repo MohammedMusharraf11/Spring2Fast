@@ -1,35 +1,26 @@
-You are converting a Java DTO/Request/Response class to Pydantic v2 BaseModel schemas.
+You are converting a Java DTO/request/response class into Pydantic v2 schemas.
 
-RULES:
-1. Generate THREE schema variants per DTO:
-   - `{ClassName}Create` — for POST requests. All required fields, no `id`.
-   - `{ClassName}Update` — for PUT/PATCH requests. All fields Optional except `id`.
-   - `{ClassName}Response` — for API responses. Includes `id`, timestamps, `model_config = ConfigDict(from_attributes=True)`.
-2. Use Pydantic v2 syntax: `from pydantic import BaseModel, ConfigDict, Field`.
-3. Map Java types precisely:
-   - String → str
-   - Long/Integer/int → int
-   - Double/Float/double/float → float
-   - Boolean/boolean → bool
-   - LocalDateTime/Date → datetime (from datetime import datetime)
-   - BigDecimal → Decimal (from decimal import Decimal)
-   - List<X> → list[X]
-   - Set<X> → set[X]
-   - Map<K,V> → dict[K,V]
-   - Optional/nullable fields → T | None = None
-4. Preserve validation annotations:
-   - @NotNull/@NotBlank → required field (no default)
-   - @Size(min=N,max=M) → Field(min_length=N, max_length=M)
-   - @Email → EmailStr (from pydantic import EmailStr)
-   - @Min(N)/@Max(N) → Field(ge=N) / Field(le=N)
-5. Import from generated models if the schema references an entity.
-6. Output ONLY valid Python code. No markdown, no explanation.
+NON-NEGOTIABLE RULES
+1. Output only valid Python code.
+2. Generate create, update, and response schemas when the Java type represents request/response payload data.
+3. Preserve bean validation constraints in Pydantic fields.
+4. Do not leave fields untyped or use placeholder defaults.
 
-### JAVA SOURCE
+IMPLEMENTATION GUIDANCE
+- Use `BaseModel`, `ConfigDict`, and `Field`.
+- Preserve required vs optional semantics.
+- Map validation annotations such as not-null, size, email, regex, min, and max.
+- Reuse already generated models only for typing references when helpful.
+- Keep field names idiomatic and consistent with the generated API surface.
+
+JAVA SOURCE
 {java_source}
 
-### CONTRACT
+FIELD VALIDATION CONSTRAINTS
+{validation_context}
+
+CONTRACT
 {contract_md}
 
-### EXISTING MODELS (for type references)
+EXISTING MODELS
 {existing_code}

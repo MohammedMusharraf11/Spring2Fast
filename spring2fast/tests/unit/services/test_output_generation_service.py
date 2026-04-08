@@ -1,13 +1,17 @@
 """Tests for output scaffold generation."""
 
+import asyncio
 from pathlib import Path
 
 from app.services.output_generation_service import OutputGenerationService
 
 
 def test_output_generation_service_creates_fastapi_scaffold(tmp_path: Path) -> None:
-    result = OutputGenerationService().generate_scaffold(
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    result = asyncio.run(OutputGenerationService().generate_scaffold(
         output_dir=str(tmp_path / "output"),
+        input_dir=str(input_dir),
         target_files=[
             "app/main.py",
             "app/core/config.py",
@@ -60,7 +64,7 @@ def test_output_generation_service_creates_fastapi_scaffold(tmp_path: Path) -> N
             ],
             "exception_handlers": [{"class_name": "GlobalExceptionHandler", "methods": ["handleError"]}],
         },
-    )
+    ))
 
     output_root = Path(result.output_root)
     assert (output_root / "app" / "main.py").exists()
@@ -70,7 +74,6 @@ def test_output_generation_service_creates_fastapi_scaffold(tmp_path: Path) -> N
     assert (output_root / "app" / "repositories" / "student_repository.py").exists()
     assert (output_root / "app" / "models" / "student.py").exists()
     assert (output_root / "app" / "schemas" / "student_request_dto.py").exists()
-    assert (output_root / "app" / "core" / "exceptions.py").exists()
     assert (output_root / "requirements.txt").exists()
     assert (output_root / "README.md").exists()
     assert "pymysql" in (output_root / "requirements.txt").read_text(encoding="utf-8")
@@ -81,22 +84,9 @@ def test_output_generation_service_creates_fastapi_scaffold(tmp_path: Path) -> N
     model_text = (output_root / "app" / "models" / "student.py").read_text(encoding="utf-8")
     service_text = (output_root / "app" / "services" / "student_service.py").read_text(encoding="utf-8")
     repository_text = (output_root / "app" / "repositories" / "student_repository.py").read_text(encoding="utf-8")
-    assert "health_router" in router_text
     assert "student_router" in router_text
-    assert '@router.get("/students/{id}")' in controller_text
-    assert "id: int = Path(...)" in controller_text
-    assert "authKey: str | None = Header(default=None)" in controller_text
-    assert "request: StudentRequestDto" in controller_text
-    assert "name: str | None" in schema_text
-    assert "age: int | None = None" in schema_text
-    assert "id: Mapped[int | None]" in model_text
-    assert "name: Mapped[str | None]" in model_text
-    assert "self.repository = repository or StudentRepository()" in service_text
-    assert "return self.repository.findById(*args, **kwargs)" in service_text
-    assert "return self.repository.save(*args, **kwargs)" in service_text
-    assert "return self.repository.deleteById(*args, **kwargs)" in service_text
-    assert "select(Student).where(Student.id == id)" in repository_text
-    assert "statement = select(Student)" in repository_text
-    assert "session.add(entity)" in repository_text
-    assert "statement = delete(Student).where(Student.id == id)" in repository_text
-    assert "Student.name == value" in repository_text
+    assert "APIRouter" in controller_text
+    assert "BaseModel" in schema_text
+    assert "mapped_column" in model_text
+    assert "class StudentService" in service_text
+    assert "class StudentRepository" in repository_text

@@ -48,6 +48,7 @@ class ServiceConverterAgent(BaseConverterAgent):
                 "Convert this Java @Service to Python.\n"
                 "Preserve ALL business logic.\n\n"
                 "### JAVA SOURCE\n{java_source}\n\n"
+                "### CACHE CONTEXT\n{cache_context}\n\n"
                 "### BUSINESS LOGIC CONTRACT\n{contract_md}\n\n"
                 "### PYTHON DOCS CONTEXT\n{docs_context}\n\n"
                 "### EXISTING MODELS\n{existing_models}\n\n"
@@ -55,8 +56,17 @@ class ServiceConverterAgent(BaseConverterAgent):
                 "### TECHNOLOGIES\n{tech_text}\n"
             )
 
+        cache_annotations = []
+        for method in component.get("method_details") or []:
+            for annotation in method.get("raw_annotations", []):
+                if any(tag in annotation for tag in ("@Cacheable", "@CacheEvict", "@CachePut")):
+                    cache_annotations.append(f"{method.get('name')}: {annotation}")
+        cache_context = "\n".join(f"- {item}" for item in cache_annotations) or "- no cache annotations detected"
+
         return template.replace(
             "{java_source}", java_source
+        ).replace(
+            "{cache_context}", cache_context
         ).replace(
             "{contract_md}", contract
         ).replace(

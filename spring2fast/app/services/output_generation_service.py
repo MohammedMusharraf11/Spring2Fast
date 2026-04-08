@@ -154,6 +154,13 @@ class OutputGenerationService:
             "services": "services",
             "controllers": "controllers",
         }
+        module_suffix_map = {
+            "models": "model",
+            "schemas": "schema",
+            "repositories": "repository",
+            "services": "service",
+            "controllers": "controller",
+        }
         
         inventory_key = chunk_map.get(chunk_key)
         if not inventory_key:
@@ -163,7 +170,7 @@ class OutputGenerationService:
         for component in components:
             class_name = str(component["class_name"])
             java_path = component.get("file_path")
-            module_name = self._component_module_name(class_name, chunk_key.rstrip("s"))
+            module_name = self._component_module_name(class_name, module_suffix_map.get(chunk_key, chunk_key))
             
             # Target output path
             if chunk_key == "controllers":

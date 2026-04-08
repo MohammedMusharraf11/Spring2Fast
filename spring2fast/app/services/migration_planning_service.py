@@ -90,8 +90,12 @@ class MigrationPlanningService:
             "app/api/v1/endpoints/migration.py",
             "app/core/config.py",
             "app/db/session.py",
+            "alembic.ini",
+            "Dockerfile",
+            "docker-compose.yml",
             "app/schemas/__init__.py",
             "app/services/__init__.py",
+            "tests/__init__.py",
         ]
         if "spring-data-jpa" in discovered_technologies or "hibernate" in discovered_technologies:
             files.extend(
@@ -123,6 +127,7 @@ class MigrationPlanningService:
             "Create the FastAPI project skeleton and base configuration files.",
             "Translate controllers into FastAPI routers while preserving endpoint behavior.",
             "Translate service-layer workflows into Python services with preserved validations and branching.",
+            "Generate runnable infrastructure including database session wiring, container files, and test scaffolding.",
         ]
         if "spring-data-jpa" in discovered_technologies or "hibernate" in discovered_technologies:
             steps.append("Model JPA entities and repositories using SQLAlchemy ORM and repository helpers.")

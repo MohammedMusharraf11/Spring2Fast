@@ -1,5 +1,6 @@
 """Tests for the technology discovery node."""
 
+import asyncio
 from pathlib import Path
 
 from app.agents.nodes.tech_discover import tech_discover_node
@@ -51,7 +52,7 @@ def test_tech_discover_node_updates_state_and_writes_artifact(tmp_path: Path) ->
         "metadata": {},
     }
 
-    result = tech_discover_node(state)
+    result = asyncio.run(tech_discover_node(state))
 
     assert result["status"] == "analyzing"
     assert result["progress_pct"] == 25

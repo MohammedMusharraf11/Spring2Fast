@@ -67,6 +67,9 @@ def route_to_converter(state: MigrationState) -> str:
         "service": "service_converter",
         "controller": "controller_converter",
         "exception_handler": "exception_converter",
+        "feign_client": "feign_converter",
+        "event_consumer": "event_consumer_converter",
+        "scheduled_task": "scheduler_converter",
         "config": "config_converter",
     }
     return converter_map.get(comp_type, "config_converter")

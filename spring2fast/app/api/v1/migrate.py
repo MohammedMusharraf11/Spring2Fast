@@ -507,3 +507,63 @@ async def push_to_github(job_id: str, request: GitHubPushRequest):
         "repo_name": repo_name,
         "message": f"Successfully pushed {job_id[:8]} -> {repo_url}",
     }
+
+
+# ── Sandbox Testing ───────────────────────────────────────────────────────────
+
+import json as _json  # noqa: E402
+
+
+async def _run_sandbox_background(job_id: str, output_dir: str, artifacts_dir: str) -> None:
+    """Background task: spin up the generated app and run smoke tests."""
+    from app.agents.generators.sandbox_tester import SandboxTester
+    tester = SandboxTester()
+    await tester.run(job_id=job_id, output_dir=output_dir, artifacts_dir=artifacts_dir)
+
+
+@router.post("/{job_id}/sandbox")
+async def run_sandbox_test(job_id: str, background_tasks: BackgroundTasks):
+    """Spin up the generated FastAPI project and smoke-test all its endpoints."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job must be completed before sandbox testing (current status: {job.get('status')})",
+        )
+
+    workspace = Path(settings.workspace_dir) / job_id
+    output_dir = str(workspace / "output")
+    artifacts_dir = str(workspace / "artifacts")
+
+    background_tasks.add_task(_run_sandbox_background, job_id, output_dir, artifacts_dir)
+    return {
+        "status": "sandbox_started",
+        "job_id": job_id,
+        "message": "Sandbox test started. Poll /sandbox-report for results.",
+        "poll_url": f"/api/v1/migrate/{job_id}/sandbox-report",
+    }
+
+
+@router.get("/{job_id}/sandbox-report")
+async def get_sandbox_report(job_id: str):
+    """Get sandbox test results. Poll until status != 'running'."""
+    workspace = Path(settings.workspace_dir) / job_id
+    report_path = workspace / "artifacts" / "sandbox_report.json"
+    status_path = workspace / "artifacts" / "_sandbox_status.json"
+
+    if report_path.exists():
+        return _json.loads(report_path.read_text(encoding="utf-8"))
+    if status_path.exists():
+        return _json.loads(status_path.read_text(encoding="utf-8"))
+    return {"status": "not_started", "job_id": job_id}
+
+
+@router.get("/{job_id}/sandbox-status")
+async def get_sandbox_status(job_id: str):
+    """Compatibility alias for the sandbox report endpoint."""
+    report = await get_sandbox_report(job_id)
+    if report.get("status") == "completed" or "results" in report:
+        return {"status": "completed", "report": report}
+    return report

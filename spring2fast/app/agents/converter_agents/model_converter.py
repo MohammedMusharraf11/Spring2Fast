@@ -41,12 +41,21 @@ class ModelConverterAgent(BaseConverterAgent):
                 "Convert this Java @Entity to a SQLAlchemy 2.0 model.\n"
                 "Use Mapped[T] and mapped_column() syntax.\n\n"
                 "### JAVA SOURCE\n{java_source}\n\n"
+                "### INHERITED FIELDS\n{inherited_fields}\n\n"
                 "### CONTRACT\n{contract_md}\n\n"
                 "### EXISTING MODELS\n{existing_code}\n"
             )
 
+        inherited_fields = component.get("inherited_fields") or []
+        inherited_text = "\n".join(
+            f"- {field['name']}: {field['type']}"
+            for field in inherited_fields
+        ) or "- none"
+
         return template.replace(
             "{java_source}", java_source
+        ).replace(
+            "{inherited_fields}", inherited_text
         ).replace(
             "{contract_md}", contract
         ).replace(

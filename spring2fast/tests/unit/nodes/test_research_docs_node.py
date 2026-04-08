@@ -1,5 +1,6 @@
 """Tests for the docs-research node."""
 
+import asyncio
 from pathlib import Path
 
 from app.agents.nodes.research_docs import research_docs_node
@@ -34,7 +35,7 @@ def test_research_docs_node_updates_state_and_artifact(tmp_path: Path) -> None:
         "metadata": {},
     }
 
-    result = research_docs_node(state)
+    result = asyncio.run(research_docs_node(state))
 
     assert result["status"] == "planning"
     assert result["progress_pct"] == 50

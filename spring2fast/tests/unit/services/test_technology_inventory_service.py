@@ -1,5 +1,6 @@
 """Tests for technology discovery scanning."""
 
+import asyncio
 from pathlib import Path
 
 from app.services.technology_inventory_service import TechnologyInventoryService
@@ -8,7 +9,7 @@ from app.services.technology_inventory_service import TechnologyInventoryService
 class _StubEnricher:
     enabled = True
 
-    def enrich(self, **_kwargs):
+    async def enrich(self, **_kwargs):
         return {
             "summary": "The project likely uses JWT-based authentication and PostgreSQL.",
             "additional_technologies": ["jwt"],
@@ -44,10 +45,10 @@ def test_technology_inventory_service_detects_java_stack(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    result = TechnologyInventoryService(enricher=_StubEnricher()).scan_project(
+    result = asyncio.run(TechnologyInventoryService(enricher=_StubEnricher()).scan_project(
         input_dir=str(project_dir),
         artifacts_dir=str(artifacts_dir),
-    )
+    ))
 
     assert "maven" in result.build_systems
     assert "spring-web" in result.technologies

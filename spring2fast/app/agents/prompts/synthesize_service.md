@@ -1,49 +1,49 @@
-You are converting a Java @Service class to a Python service class.
+You are converting a Java Spring `@Service` class into a fully implemented async Python service class for FastAPI.
 
-CRITICAL: Preserve EVERY piece of business logic. This is the most important layer.
+NON-NEGOTIABLE RULES
+1. Output only valid Python code.
+2. Preserve every Java method as a Python method unless it is a trivial getter/setter that is already represented by the model or schema.
+3. Never use `pass`, `return None` as a placeholder, `raise NotImplementedError`, ellipsis, TODO comments, or placeholder comments inside method bodies.
+4. Every method must contain real logic derived from the Java source, the contract, and the already-generated repositories/models/schemas.
+5. Use async SQLAlchemy patterns and await repository or session operations.
+6. If Java throws domain exceptions, convert them to appropriate `HTTPException` or domain-specific Python exceptions with real messages.
 
-RULES:
-1. Map the Spring service to a plain Python class with constructor injection:
-   ```python
-   class UserService:
-       def __init__(self, db: AsyncSession) -> None:
-           self.db = db
-           self.user_repo = UserRepository(db)
-   ```
-2. Use the EXISTING REPOSITORIES as dependencies. Import them from `app.repositories.{snake_name}`.
-3. Use the EXISTING MODELS for type annotations. Import from `app.models.{snake_name}`.
-4. Use the EXISTING SCHEMAS for input/output types. Import from `app.schemas.{snake_name}`.
-5. Translate ALL Java business logic:
-   - if/else branches → Python if/else (every branch!)
-   - try/catch → try/except with specific exception types
-   - Stream/Optional → list comprehensions / `or None`
-   - @Transactional → the db session handles transactions
-   - Lombok @Slf4j logging → Python `import logging; logger = logging.getLogger(__name__)`
-6. Raise FastAPI HTTPException for error cases:
-   - EntityNotFoundException → HTTPException(status_code=404)
-   - ValidationException → HTTPException(status_code=422)
-   - AccessDenied → HTTPException(status_code=403)
-7. Make methods async if they do DB operations.
-8. If the service uses third-party tech (Redis, Kafka, etc.), use the PYTHON DOCS CONTEXT below.
-9. Output ONLY valid Python code. No markdown, no explanation.
+IMPLEMENTATION GUIDANCE
+- Build a concrete service class with `__init__(self, db: AsyncSession)`.
+- Reuse generated repositories when repository access is needed.
+- Preserve control flow, validation branches, authorization checks, loops, stream transformations, and transaction semantics.
+- Translate Java collections and stream pipelines into normal Python loops/comprehensions with actual return values.
+- When data is created or updated, commit and refresh through the async session or repository implementation.
+- When an entity is not found, raise `HTTPException(status_code=404, detail=...)`.
+- When access is denied, raise `HTTPException(status_code=403, detail=...)`.
+- If caching annotations are present, preserve the intent in code structure and comments only when necessary, but do not leave the method body empty.
 
-### JAVA SOURCE
+OUTPUT SHAPE
+- Include imports.
+- Define exactly one service class for the source component.
+- Keep method names idiomatic Python snake_case.
+- Return concrete values that match the method behavior.
+
+JAVA SOURCE
 {java_source}
 
-### BUSINESS LOGIC CONTRACT (must satisfy ALL rules listed here)
+BUSINESS LOGIC CONTRACT
 {contract_md}
 
-### PYTHON DOCS CONTEXT (for third-party libraries)
+PYTHON DOCS CONTEXT
 {docs_context}
 
-### EXISTING MODELS (import from these)
+EXISTING MODELS
 {existing_models}
 
-### EXISTING SCHEMAS (import from these)
+EXISTING SCHEMAS
 {existing_schemas}
 
-### EXISTING REPOSITORIES (import and use as dependencies)
+EXISTING REPOSITORIES
 {existing_repos}
 
-### TECHNOLOGIES
+CACHE CONTEXT
+{cache_context}
+
+DETECTED TECHNOLOGIES
 {tech_text}

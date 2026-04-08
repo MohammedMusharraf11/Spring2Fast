@@ -40,5 +40,5 @@ def test_graph_runs_end_to_end_with_scaffold(tmp_path: Path) -> None:
     assert "integration_mapping" in result["analysis_artifacts"]
     assert "migration_plan" in result["analysis_artifacts"]
     assert result["generated_files"]
-    assert "Initial workflow scaffold completed" in result["logs"]
+    assert any("Packaged result into" in item for item in result["logs"])
     clone_from.assert_called_once()

@@ -1,5 +1,6 @@
 """Tests for official-docs research mapping."""
 
+import asyncio
 from pathlib import Path
 
 from app.services.docs_research_service import DocsResearchService
@@ -38,7 +39,7 @@ class _StubMCPResearchService:
 
 
 class _StubDocsEnricher:
-    def enrich_batch(self, *, candidates):
+    async def enrich_batch(self, *, candidates):
         results = []
         for candidate in candidates:
             static_reference = candidate.get("static_reference") or {}
@@ -58,14 +59,14 @@ class _StubDocsEnricher:
 def test_docs_research_service_builds_official_reference_artifact(tmp_path: Path) -> None:
     search_service = _StubGoogleSearchService()
     mcp_service = _StubMCPResearchService()
-    result = DocsResearchService(
+    result = asyncio.run(DocsResearchService(
         search_service=search_service,
         mcp_research_service=mcp_service,
         enricher=_StubDocsEnricher(),
     ).build_references(
         technologies=["spring-boot", "spring-data-jpa", "redis", "supabase"],
         artifacts_dir=str(tmp_path),
-    )
+    ))
 
     assert len(result.references) == 4
     assert result.artifact_path.exists()

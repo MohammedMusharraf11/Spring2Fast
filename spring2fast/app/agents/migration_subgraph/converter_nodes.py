@@ -17,6 +17,9 @@ from app.agents.converter_agents.repo_converter import repo_converter_agent
 from app.agents.converter_agents.service_converter import service_converter_agent
 from app.agents.converter_agents.controller_converter import controller_converter_agent
 from app.agents.converter_agents.exception_converter import exception_converter_agent
+from app.agents.converter_agents.feign_converter import feign_converter_agent
+from app.agents.converter_agents.event_consumer_converter import event_consumer_converter_agent
+from app.agents.converter_agents.scheduler_converter import scheduler_converter_agent
 
 
 async def _push_progress(state: MigrationState) -> None:
@@ -70,6 +73,7 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
         artifacts_dir=next_state.get("artifacts_dir", ""),
         discovered_technologies=next_state.get("discovered_technologies", []),
         existing_code=next_state.get("existing_generated_code", {}),
+        output_registry=next_state.get("output_registry", {}),
     )
 
     result_dict = result.to_dict()
@@ -81,6 +85,10 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
         next_state["generated_files"] = list(set(
             next_state.get("generated_files", []) + [result.output_path]
         ))
+        next_state["output_registry"] = {
+            **next_state.get("output_registry", {}),
+            result.component_name: result.output_path,
+        }
         next_state["logs"] = [
             *next_state.get("logs", []),
             f"OK {result.component_name} ({result.tier_used}, {result.attempts} attempts)",
@@ -132,6 +140,21 @@ async def exception_converter_node(state: MigrationState) -> MigrationState:
     return await _run_converter(state, exception_converter_agent)
 
 
+async def feign_converter_node(state: MigrationState) -> MigrationState:
+    """Convert a Java @FeignClient into an async httpx client."""
+    return await _run_converter(state, feign_converter_agent)
+
+
+async def event_consumer_converter_node(state: MigrationState) -> MigrationState:
+    """Convert Java Kafka/Rabbit listeners into async consumer modules."""
+    return await _run_converter(state, event_consumer_converter_agent)
+
+
+async def scheduler_converter_node(state: MigrationState) -> MigrationState:
+    """Convert Java @Scheduled methods into APScheduler jobs."""
+    return await _run_converter(state, scheduler_converter_agent)
+
+
 def config_converter_node(state: MigrationState) -> MigrationState:
     """Generate ALL infrastructure/scaffold files — deterministic, no LLM.
 
@@ -163,11 +186,23 @@ def config_converter_node(state: MigrationState) -> MigrationState:
     # ── main.py ──
     _write("app/main.py", (
         '"""FastAPI application entry point."""\n\n'
+        "from contextlib import asynccontextmanager\n\n"
         "from fastapi import FastAPI\n"
         "from fastapi.middleware.cors import CORSMiddleware\n\n"
         "from app.api.v1.router import api_router\n"
         "from app.db.session import engine, Base\n\n\n"
-        'app = FastAPI(title="Migrated FastAPI Backend")\n\n'
+        "@asynccontextmanager\n"
+        "async def lifespan(app: FastAPI):\n"
+        "    try:\n"
+        "        from app.scheduler import scheduler\n"
+        "    except Exception:\n"
+        "        scheduler = None\n"
+        "    if scheduler is not None:\n"
+        "        scheduler.start()\n"
+        "    yield\n"
+        "    if scheduler is not None:\n"
+        "        scheduler.shutdown(wait=False)\n\n\n"
+        'app = FastAPI(title="Migrated FastAPI Backend", lifespan=lifespan)\n\n'
         "app.add_middleware(\n"
         "    CORSMiddleware,\n"
         '    allow_origins=["*"],\n'
@@ -231,6 +266,11 @@ def config_converter_node(state: MigrationState) -> MigrationState:
         config_fields.append('    redis_url: str = "redis://localhost:6379/0"')
     if "kafka" in techs:
         config_fields.append('    kafka_bootstrap_servers: str = "localhost:9092"')
+    if "rabbitmq" in techs:
+        config_fields.append('    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"')
+    for client in inventory.get("feign_clients", []):
+        key = _to_snake(str(client.get("class_name", "service_client")).removesuffix("Client"))
+        config_fields.append(f'    {key}_url: str = "http://localhost:8001"')
 
     _write("app/core/config.py", (
         '"""Application settings."""\n\n'
@@ -310,7 +350,8 @@ def config_converter_node(state: MigrationState) -> MigrationState:
     # ── __init__.py for every package ──
     packages = [
         "app", "app/core", "app/db", "app/models", "app/schemas",
-        "app/services", "app/repositories", "app/api", "app/api/v1",
+        "app/services", "app/repositories", "app/clients", "app/consumers",
+        "app/api", "app/api/v1",
         "app/api/v1/endpoints",
     ]
     for pkg in packages:
@@ -334,12 +375,15 @@ def config_converter_node(state: MigrationState) -> MigrationState:
         reqs.extend(["motor", "beanie"])
     if "redis" in techs:
         reqs.append("redis[hiredis]")
+        reqs.append("aiocache")
     if "spring-security" in techs or "jwt" in techs:
         reqs.extend(["python-jose[cryptography]", "passlib[bcrypt]"])
     if "kafka" in techs:
         reqs.append("aiokafka")
     if "rabbitmq" in techs:
         reqs.append("aio-pika")
+    if inventory.get("scheduled_tasks"):
+        reqs.append("apscheduler")
     if "supabase" in techs:
         reqs.append("supabase")
 

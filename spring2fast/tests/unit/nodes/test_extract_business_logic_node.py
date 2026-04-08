@@ -1,5 +1,6 @@
 """Tests for the business logic extraction node."""
 
+import asyncio
 from pathlib import Path
 
 from app.agents.nodes.extract_business_logic import extract_business_logic_node
@@ -49,7 +50,7 @@ def test_extract_business_logic_node_updates_state_and_artifact(tmp_path: Path) 
         "metadata": {},
     }
 
-    result = extract_business_logic_node(state)
+    result = asyncio.run(extract_business_logic_node(state))
 
     assert result["current_step"] == "Extracted Java business rules"
     assert result["progress_pct"] == 40

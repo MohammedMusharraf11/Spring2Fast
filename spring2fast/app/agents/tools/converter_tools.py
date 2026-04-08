@@ -390,6 +390,30 @@ def lint_code(code: str) -> dict[str, Any]:
         return {"valid": True, "errors": []}  # ruff unavailable — skip
 
 
+def parse_bean_validation(fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map Java Bean Validation metadata into a Pydantic-friendly summary."""
+    parsed: dict[str, dict[str, Any]] = {}
+    for field in fields:
+        name = str(field.get("name", ""))
+        annotations = field.get("annotations", []) or []
+        validation = dict(field.get("validation") or {})
+        ann_names: list[str] = []
+        for annotation in annotations:
+            if isinstance(annotation, dict):
+                ann_names.append(str(annotation.get("name", "")).lstrip("@"))
+            else:
+                ann_names.append(str(annotation).lstrip("@"))
+        if not validation:
+            for ann in ann_names:
+                if ann in {"NotNull", "NotBlank", "NotEmpty"}:
+                    validation["required"] = True
+                elif ann == "Email":
+                    validation["format"] = "email"
+        if validation:
+            parsed[name] = validation
+    return parsed
+
+
 # ─────────────────────────────────────────────
 # WRITE tools
 # ─────────────────────────────────────────────

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.converter_agents.base import BaseConverterAgent
+from app.agents.tools.converter_tools import parse_bean_validation
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
@@ -40,12 +41,21 @@ class SchemaConverterAgent(BaseConverterAgent):
             template = (
                 "Convert this Java DTO to a Pydantic v2 BaseModel.\n\n"
                 "### JAVA SOURCE\n{java_source}\n\n"
+                "### FIELD VALIDATION CONSTRAINTS\n{validation_context}\n\n"
                 "### CONTRACT\n{contract_md}\n\n"
                 "### EXISTING MODELS\n{existing_code}\n"
             )
 
+        validation_context = parse_bean_validation(component.get("all_fields") or component.get("fields") or [])
+        validation_text = "\n".join(
+            f"- {field_name}: {rules}"
+            for field_name, rules in validation_context.items()
+        ) or "- none"
+
         return template.replace(
             "{java_source}", java_source
+        ).replace(
+            "{validation_context}", validation_text
         ).replace(
             "{contract_md}", contract
         ).replace(

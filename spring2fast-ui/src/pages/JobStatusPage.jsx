@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+﻿import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useApi } from '../context/ApiContext';
 import {
@@ -55,6 +55,8 @@ const JobStatusPage = () => {
   const [pushResult, setPushResult]   = useState(null);
   const [pushError, setPushError]     = useState('');
   const [serverGhConfig, setServerGhConfig] = useState(null); // {configured, token_hint}
+  const [sandboxStatus, setSandboxStatus] = useState({ status: 'not_started' });
+  const [sandboxRunning, setSandboxRunning] = useState(false);
   const pollRef = useRef(null);
 
   const fetchState = useCallback(async () => {
@@ -75,13 +77,34 @@ const JobStatusPage = () => {
     }
   }, [get, jobId]);
 
+  const fetchSandboxStatus = useCallback(async () => {
+    try {
+      const response = await get(`/api/v1/migrate/${jobId}/sandbox-status`);
+      setSandboxStatus(response.data);
+      setSandboxRunning(response.data?.status === 'running');
+    } catch {
+      // Keep the UI quiet if sandbox hasn't been started yet.
+    }
+  }, [get, jobId]);
+
   useEffect(() => {
     fetchState();
+    fetchSandboxStatus();
     pollRef.current = setInterval(fetchState, POLL_INTERVAL);
     // Check server GitHub config once
     get('/api/v1/health').then(r => setServerGhConfig(r.data?.github)).catch(() => {});
     return () => clearInterval(pollRef.current);
-  }, [fetchState]);
+  }, [fetchState, fetchSandboxStatus]);
+
+  useEffect(() => {
+    let interval = null;
+    if (sandboxRunning) {
+      interval = setInterval(fetchSandboxStatus, POLL_INTERVAL);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [sandboxRunning, fetchSandboxStatus]);
 
   // Stop polling when job is done
   useEffect(() => {
@@ -142,6 +165,17 @@ const JobStatusPage = () => {
     }
   };
 
+  const handleRunSandbox = async () => {
+    setSandboxRunning(true);
+    try {
+      await fetch(`${apiUrl}/api/v1/migrate/${jobId}/sandbox`, { method: 'POST' });
+      await fetchSandboxStatus();
+    } catch (e) {
+      setSandboxStatus({ status: 'failed', error: e.message || 'Failed to start sandbox test' });
+      setSandboxRunning(false);
+    }
+  };
+
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 12 }}>
@@ -162,6 +196,7 @@ const JobStatusPage = () => {
   const meta = statusMeta[state.status] || statusMeta.pending;
   const StatusIcon = meta.icon;
   const inProgress = isInProgress(state.status);
+  const sandboxReport = sandboxStatus?.report;
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto', padding: '32px 32px 48px' }}>
@@ -175,7 +210,7 @@ const JobStatusPage = () => {
         Back to Home
       </button>
 
-      {/* ─── Header Card ─── */}
+      {/* â”€â”€â”€ Header Card â”€â”€â”€ */}
       <div className="card animate-fade-in" style={{ padding: '24px 28px', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'start', justifyContent: 'space-between', marginBottom: 18 }}>
           <div>
@@ -244,7 +279,7 @@ const JobStatusPage = () => {
         </div>
       )}
 
-      {/* ─── Export Panel (completed only) ─── */}
+      {/* â”€â”€â”€ Export Panel (completed only) â”€â”€â”€ */}
       {state.status === 'completed' && (
         <div className="card animate-fade-in" style={{ marginBottom: 20, padding: '20px 24px' }}>
           <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -252,7 +287,7 @@ const JobStatusPage = () => {
             Export Migrated Project
           </h3>
 
-          {/* Push to GitHub — primary action */}
+          {/* Push to GitHub â€” primary action */}
           <div style={{ background: 'var(--surface-0)', borderRadius: 12, padding: '16px', border: '1px solid var(--border-subtle)', marginBottom: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
               <Github size={17} style={{ color: 'hsl(225,80%,65%)' }} />
@@ -303,8 +338,8 @@ const JobStatusPage = () => {
                     {serverGhConfig?.configured
                       ? 'Using GITHUB_PAT from server .env. Paste a token above to override.'
                       : <>
-                          Needs <code style={{ color: 'hsl(225,80%,65%)' }}>repo</code> scope •{' '}
-                          <a href="https://github.com/settings/tokens/new?scopes=repo&description=Spring2Fast" target="_blank" rel="noopener noreferrer" style={{ color: 'hsl(225,80%,65%)' }}>Generate token ↗</a>
+                          Needs <code style={{ color: 'hsl(225,80%,65%)' }}>repo</code> scope â€¢{' '}
+                          <a href="https://github.com/settings/tokens/new?scopes=repo&description=Spring2Fast" target="_blank" rel="noopener noreferrer" style={{ color: 'hsl(225,80%,65%)' }}>Generate token â†—</a>
                         </>
                     }
                   </p>
@@ -366,7 +401,7 @@ const JobStatusPage = () => {
             )}
           </div>
 
-          {/* ZIP download — secondary action */}
+          {/* ZIP download â€” secondary action */}
           <button
             id="download-result"
             onClick={handleDownload}
@@ -385,7 +420,83 @@ const JobStatusPage = () => {
         </div>
       )}
 
-      {/* ─── Tabs ─── */}
+      {state.status === 'completed' && (
+        <div className="card animate-fade-in" style={{ marginBottom: 20, padding: '20px 24px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 14 }}>
+            <div>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: 4 }}>Sandbox Test</h3>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: 0 }}>
+                Run the generated app in isolation and probe its OpenAPI routes once.
+              </p>
+            </div>
+            <button
+              onClick={handleRunSandbox}
+              disabled={sandboxRunning}
+              className="btn-primary"
+              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+            >
+              {sandboxRunning ? <><Loader2 size={16} className="animate-spin-slow" /> Running...</> : <><Activity size={16} /> Run Sandbox</>}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: sandboxReport ? 16 : 0 }}>
+            <div className="badge" style={{ background: 'var(--surface-0)', color: 'var(--text-secondary)' }}>
+              Status: {sandboxStatus?.status || 'not_started'}
+            </div>
+            {sandboxReport && (
+              <>
+                <div className="badge" style={{ background: 'hsla(155,65%,45%,0.12)', color: 'hsl(155,65%,55%)' }}>
+                  {sandboxReport.passed} passed
+                </div>
+                <div className="badge" style={{ background: 'hsla(40,85%,45%,0.12)', color: 'hsl(40,85%,55%)' }}>
+                  {sandboxReport.warned} warned
+                </div>
+                <div className="badge" style={{ background: 'hsla(0,65%,45%,0.12)', color: 'hsl(0,65%,60%)' }}>
+                  {sandboxReport.failed} failed
+                </div>
+                <div className="badge" style={{ background: 'var(--surface-0)', color: 'var(--text-secondary)' }}>
+                  Score {sandboxReport.score_pct}% in {sandboxReport.duration_s}s
+                </div>
+              </>
+            )}
+          </div>
+
+          {sandboxReport?.startup_error && (
+            <div className="alert-error" style={{ marginBottom: 12 }}>
+              {sandboxReport.startup_error}
+            </div>
+          )}
+
+          {sandboxReport?.results?.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-subtle)' }}>
+                    <th style={{ padding: '8px 10px' }}>Verdict</th>
+                    <th style={{ padding: '8px 10px' }}>Route</th>
+                    <th style={{ padding: '8px 10px' }}>Status</th>
+                    <th style={{ padding: '8px 10px' }}>Latency</th>
+                    <th style={{ padding: '8px 10px' }}>Snippet</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sandboxReport.results.map((item, index) => (
+                    <tr key={`${item.method}-${item.path}-${index}`} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                      <td style={{ padding: '10px' }}>{item.verdict}</td>
+                      <td style={{ padding: '10px' }}><span className="font-mono">{item.method} {item.path}</span></td>
+                      <td style={{ padding: '10px' }}>{item.status_code ?? 'ERR'}</td>
+                      <td style={{ padding: '10px' }}>{item.latency_ms}ms</td>
+                      <td style={{ padding: '10px', color: 'var(--text-muted)' }}>{item.response_snippet || item.error || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tabs */}
       <div className="tab-bar" style={{ marginBottom: 20, overflowX: 'auto' }}>
         {TABS.map((tab) => {
           const TabIcon = tab.icon;
@@ -403,7 +514,7 @@ const JobStatusPage = () => {
         })}
       </div>
 
-      {/* ─── Tab Content ─── */}
+      {/* â”€â”€â”€ Tab Content â”€â”€â”€ */}
       <div className="animate-fade-in" key={activeTab}>
         {activeTab === 'pipeline' && <PipelineVisualization state={state} />}
         {activeTab === 'source' && <SourceFileBrowser jobId={jobId} />}
@@ -428,3 +539,4 @@ const JobStatusPage = () => {
 };
 
 export default JobStatusPage;
+

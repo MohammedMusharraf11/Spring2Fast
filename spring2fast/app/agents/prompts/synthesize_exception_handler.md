@@ -1,20 +1,18 @@
-You are converting a Java @ControllerAdvice / @RestControllerAdvice class to FastAPI exception handlers.
+You are converting a Java `@ControllerAdvice` or `@RestControllerAdvice` into FastAPI exception handler registration code.
 
-RULES:
-1. Create custom exception classes that extend Python's Exception.
-2. Register FastAPI exception handlers using `@app.exception_handler(CustomException)`.
-3. Map common patterns:
-   - @ExceptionHandler(EntityNotFoundException.class) → custom NotFoundException + handler returning 404
-   - @ExceptionHandler(ValidationException.class) → handler returning 422
-   - @ExceptionHandler(AccessDeniedException.class) → handler returning 403
-   - @ExceptionHandler(Exception.class) → handler returning 500
-4. Each handler returns a JSONResponse with {"detail": message} body.
-5. Include all necessary imports: fastapi, starlette.responses, etc.
-6. Export a function `register_exception_handlers(app: FastAPI)` that registers all handlers.
-7. Output ONLY valid Python code. No markdown, no explanation.
+NON-NEGOTIABLE RULES
+1. Output only valid Python code.
+2. Create real exception types and real FastAPI exception handlers.
+3. Do not emit placeholder handlers or commentary.
 
-### JAVA SOURCE
+IMPLEMENTATION GUIDANCE
+- Export a `register_exception_handlers(app: FastAPI)` function.
+- Map not found, validation, access denied, and generic exceptions to appropriate status codes.
+- Use `JSONResponse` with a consistent `detail` payload.
+- Preserve any custom exception naming and semantics visible in the Java source.
+
+JAVA SOURCE
 {java_source}
 
-### CONTRACT
+CONTRACT
 {contract_md}

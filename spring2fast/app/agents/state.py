@@ -110,6 +110,10 @@ class MigrationState(TypedDict):
 
     # ── Component inventory ──
     component_inventory: Annotated[NotRequired[dict[str, list[dict[str, Any]]]], _merge_dicts]
+    class_hierarchy: Annotated[NotRequired[dict[str, Any]], _merge_dicts]
+    call_flow_graph: Annotated[NotRequired[dict[str, Any]], _merge_dicts]
+    per_component_notes: Annotated[NotRequired[dict[str, str]], _merge_dicts]
+    migration_checklist: Annotated[NotRequired[list[dict[str, Any]]], _always_latest]
 
     # ── Supervisor subgraph fields ──
     # IMPORTANT: These use _always_latest, NOT _latest_any.

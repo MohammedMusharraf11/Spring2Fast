@@ -78,6 +78,7 @@ from app.agents.migration_subgraph.supervisor import supervisor_node, route_to_c
 from app.agents.migration_subgraph.quality_gate import quality_gate_node, should_exit_subgraph
 from app.agents.migration_subgraph.converter_nodes import (
     model_converter_node,
+    enum_converter_node,
     schema_converter_node,
     repo_converter_node,
     service_converter_node,
@@ -97,6 +98,7 @@ def build_migration_subgraph():
     # ── Nodes ──
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("model_converter", model_converter_node)
+    builder.add_node("enum_converter", enum_converter_node)
     builder.add_node("schema_converter", schema_converter_node)
     builder.add_node("repo_converter", repo_converter_node)
     builder.add_node("service_converter", service_converter_node)
@@ -114,6 +116,7 @@ def build_migration_subgraph():
     # ── Supervisor routes to the correct converter ──
     builder.add_conditional_edges("supervisor", route_to_converter, {
         "model_converter": "model_converter",
+        "enum_converter": "enum_converter",
         "schema_converter": "schema_converter",
         "repo_converter": "repo_converter",
         "service_converter": "service_converter",
@@ -128,7 +131,7 @@ def build_migration_subgraph():
 
     # ── All converters route back to supervisor ──
     for converter in [
-        "model_converter", "schema_converter", "repo_converter",
+        "model_converter", "enum_converter", "schema_converter", "repo_converter",
         "service_converter", "controller_converter", "exception_converter",
         "feign_converter", "event_consumer_converter", "scheduler_converter",
         "config_converter",

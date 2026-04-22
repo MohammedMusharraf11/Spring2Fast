@@ -31,6 +31,42 @@ def _sanitize_output_dir(output_dir: Path) -> int:
     return fixed
 
 
+def _strip_debug_logs(output_dir: Path) -> int:
+    """Remove generator debug_log imports and calls from generated code."""
+    stripped = 0
+    for py_file in output_dir.rglob("*.py"):
+        try:
+            original = py_file.read_text(encoding="utf-8", errors="ignore")
+            cleaned = re.sub(
+                r"^from app\.debug_log import debug_log\s*\n",
+                "",
+                original,
+                flags=re.MULTILINE,
+            )
+            cleaned = re.sub(
+                r"# region agent log\n.*?# endregion\n",
+                "",
+                cleaned,
+                flags=re.DOTALL,
+            )
+            cleaned = re.sub(
+                r"^\s*debug_log\(.*?\)\s*\n",
+                "",
+                cleaned,
+                flags=re.MULTILINE,
+            )
+            if cleaned != original:
+                py_file.write_text(cleaned, encoding="utf-8")
+                stripped += 1
+        except Exception:
+            pass
+    debug_file = output_dir / "app" / "debug_log.py"
+    if debug_file.exists():
+        debug_file.unlink()
+        stripped += 1
+    return stripped
+
+
 def _write_if_missing(output_dir: Path, relative_path: str, content: str, generated: list[str]) -> None:
     file_path = output_dir / relative_path
     if file_path.exists():
@@ -48,8 +84,6 @@ def _generate_infrastructure_files(
 ) -> list[str]:
     """Backfill core infra files that every runnable FastAPI app needs."""
     created: list[str] = []
-    security_enabled = "spring-security" in discovered_technologies or "jwt" in discovered_technologies
-
     _write_if_missing(output_dir, "app/__init__.py", "", created)
     _write_if_missing(output_dir, "app/db/__init__.py", "", created)
     _write_if_missing(output_dir, "app/core/__init__.py", "", created)
@@ -84,32 +118,21 @@ def _generate_infrastructure_files(
         '"""Shared API dependencies."""\n\nfrom app.db.session import get_db  # noqa: F401\n',
         created,
     )
-    if security_enabled:
-        _write_if_missing(
-            output_dir,
-            "app/core/security.py",
-            (
-                '"""JWT dependency stubs for migrated security flows."""\n\n'
-                "from fastapi import Depends, HTTPException, status\n"
-                "from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer\n\n"
-                "try:\n"
-                "    from jose import JWTError, jwt\n"
-                "except ImportError:\n"
-                "    JWTError = Exception\n"
-                "    jwt = None\n\n"
-                "from app.core.config import settings\n\n"
-                "security = HTTPBearer(auto_error=False)\n\n"
-                "async def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> str:\n"
-                "    if not credentials or jwt is None:\n"
-                '        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=\"Unauthorized\")\n'
-                "    try:\n"
-                '        payload = jwt.decode(credentials.credentials, settings.secret_key, algorithms=[\"HS256\"])\n'
-                "        return str(payload.get(\"sub\") or \"\")\n"
-                "    except JWTError as exc:\n"
-                '        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=\"Unauthorized\") from exc\n'
-            ),
-            created,
-        )
+    _write_if_missing(
+        output_dir,
+        "app/core/security.py",
+        (
+            '"""Authentication dependency stub."""\n\n'
+            "from fastapi import HTTPException, Request, status\n\n\n"
+            "async def get_current_user(request: Request) -> str:\n"
+            '    """Extract user ID from request headers until real auth is wired."""\n'
+            '    user_id = request.headers.get("X-User-Id", "")\n'
+            "    if not user_id:\n"
+            '        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")\n'
+            "    return user_id\n"
+        ),
+        created,
+    )
 
     for item in created:
         if item not in generated_files:
@@ -131,6 +154,9 @@ def assemble_node(state: MigrationState) -> MigrationState:
         fixed_count = _sanitize_output_dir(output_dir)
         if fixed_count:
             logs.append(f"Fixed placeholder imports in {fixed_count} files")
+        debug_stripped = _strip_debug_logs(output_dir)
+        if debug_stripped:
+            logs.append(f"Stripped debug instrumentation from {debug_stripped} files")
 
         infra_files = _generate_infrastructure_files(
             output_dir=output_dir,

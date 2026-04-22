@@ -376,12 +376,7 @@ class OutputGenerationService:
                 'CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]\n'
             )
 
-        if relative_path.startswith("tests/"):
-            return (
-                '"""Generated placeholder test."""\n\n'
-                "def test_placeholder():\n"
-                "    assert True\n"
-            )
+
 
         return (
             '"""Generated placeholder module."""\n\n'

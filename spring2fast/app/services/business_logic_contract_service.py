@@ -10,9 +10,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import HumanMessage
-
-from app.core.llm import get_chat_model
 from app.services.java_ast_parser import JavaASTParser, JavaFileIR, ClassIR, MethodIR
 
 
@@ -21,7 +18,6 @@ class BusinessLogicContractService:
 
     def __init__(self) -> None:
         self.parser = JavaASTParser()
-        self.llm = get_chat_model()
 
     def generate_contracts(
         self,

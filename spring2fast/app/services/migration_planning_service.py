@@ -15,6 +15,7 @@ class MigrationPlanningResult:
     target_files: list[str]
     implementation_steps: list[str]
     risk_items: list[str]
+    per_component_notes: dict[str, str]
     artifact_path: Path
 
 
@@ -31,6 +32,8 @@ class MigrationPlanningService:
         discovered_technologies: list[str],
         business_rules: list[str],
         docs_references: list[dict[str, str]],
+        component_inventory: dict[str, list[dict[str, object]]] | None = None,
+        class_hierarchy: dict[str, object] | None = None,
     ) -> MigrationPlanningResult:
         """Generate a target-file blueprint and execution plan."""
         artifact_dir = Path(artifacts_dir)
@@ -51,10 +54,13 @@ class MigrationPlanningService:
             business_rules=business_rules,
             docs_references=docs_references,
             target_files=target_files,
+            component_inventory=component_inventory,
+            class_hierarchy=class_hierarchy,
         )
         target_files = self._merge_unique(target_files, llm_result["target_files"])
         implementation_steps = self._merge_unique(implementation_steps, llm_result["implementation_steps"])
         risk_items = self._merge_unique(risk_items, llm_result["risk_items"])
+        per_component_notes = dict(llm_result.get("per_component_notes", {}))
 
         artifact_path = artifact_dir / "07-migration-plan.md"
         artifact_path.write_text(
@@ -62,6 +68,7 @@ class MigrationPlanningService:
                 target_files=target_files,
                 implementation_steps=implementation_steps,
                 risk_items=risk_items,
+                per_component_notes=per_component_notes,
             ),
             encoding="utf-8",
         )
@@ -70,6 +77,7 @@ class MigrationPlanningService:
             target_files=target_files,
             implementation_steps=implementation_steps,
             risk_items=risk_items,
+            per_component_notes=per_component_notes,
             artifact_path=artifact_path,
         )
 
@@ -95,7 +103,6 @@ class MigrationPlanningService:
             "docker-compose.yml",
             "app/schemas/__init__.py",
             "app/services/__init__.py",
-            "tests/__init__.py",
         ]
         if "spring-data-jpa" in discovered_technologies or "hibernate" in discovered_technologies:
             files.extend(
@@ -162,10 +169,16 @@ class MigrationPlanningService:
         target_files: list[str],
         implementation_steps: list[str],
         risk_items: list[str],
+        per_component_notes: dict[str, str],
     ) -> str:
         target_text = "\n".join(f"- {path}" for path in target_files) or "- none"
         step_text = "\n".join(f"- {step}" for step in implementation_steps) or "- none"
         risk_text = "\n".join(f"- {item}" for item in risk_items) or "- none"
+        component_text = (
+            "\n".join(f"- {name}: {note}" for name, note in per_component_notes.items())
+            if per_component_notes
+            else "- none"
+        )
         return (
             "# Migration Plan\n\n"
             "## Target FastAPI Files\n"
@@ -173,5 +186,7 @@ class MigrationPlanningService:
             "## Implementation Steps\n"
             f"{step_text}\n\n"
             "## Risks\n"
-            f"{risk_text}\n"
+            f"{risk_text}\n\n"
+            "## Per-Component Notes\n"
+            f"{component_text}\n"
         )

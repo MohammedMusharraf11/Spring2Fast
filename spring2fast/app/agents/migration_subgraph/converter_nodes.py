@@ -12,6 +12,7 @@ from typing import Any
 
 from app.agents.state import MigrationState
 from app.agents.converter_agents.model_converter import model_converter_agent
+from app.agents.converter_agents.enum_converter import convert_enum
 from app.agents.converter_agents.schema_converter import schema_converter_agent
 from app.agents.converter_agents.repo_converter import repo_converter_agent
 from app.agents.converter_agents.service_converter import service_converter_agent
@@ -20,6 +21,32 @@ from app.agents.converter_agents.exception_converter import exception_converter_
 from app.agents.converter_agents.feign_converter import feign_converter_agent
 from app.agents.converter_agents.event_consumer_converter import event_consumer_converter_agent
 from app.agents.converter_agents.scheduler_converter import scheduler_converter_agent
+
+
+def _update_checklist_item(
+    checklist: list[dict[str, Any]],
+    *,
+    component_type: str,
+    class_name: str,
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    item_id = f"{component_type}:{class_name}"
+    updated: list[dict[str, Any]] = []
+    found = False
+    for item in checklist:
+        if item.get("id") == item_id:
+            found = True
+            next_item = dict(item)
+            next_item["status"] = "done" if result.get("passed") else "failed"
+            next_item["tier"] = result.get("tier_used")
+            next_item["error"] = result.get("error") or None
+            next_item["attempts"] = result.get("attempts", 0)
+            if result.get("output_path"):
+                next_item["target_file"] = result["output_path"]
+            updated.append(next_item)
+        else:
+            updated.append(item)
+    return updated if found else checklist
 
 
 async def _push_progress(state: MigrationState) -> None:
@@ -57,13 +84,6 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
 
     component = current.get("component", {})
 
-    # ── Throttle: only needed for Groq (30 RPM limit). Bedrock has no RPM cap. ──
-    from app.core.llm import _bedrock_model as _check_bedrock
-    using_bedrock = bool(
-        __import__("app.config", fromlist=["settings"]).settings.bedrock_aws_access_key_id
-    )
-    if not using_bedrock:
-        await asyncio.sleep(3.0)  # 3s = 20 req/min, safely under Groq's 30 RPM
 
     result = await agent.convert(
         component=component,
@@ -77,6 +97,8 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
     )
 
     result_dict = result.to_dict()
+    result_dict["original_component"] = component
+    checklist = next_state.get("migration_checklist", [])
 
     if result.passed:
         completed = next_state.get("completed_conversions", [])
@@ -102,6 +124,12 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
             f"FAIL {result.component_name}: {result.error}",
         ]
 
+    next_state["migration_checklist"] = _update_checklist_item(
+        checklist,
+        component_type=result.component_type,
+        class_name=result.component_name,
+        result=result_dict,
+    )
     next_state["current_conversion"] = None
 
     # ── Push live progress to Supabase after every converted component ──
@@ -113,6 +141,70 @@ async def _run_converter(state: MigrationState, agent: Any) -> MigrationState:
 async def model_converter_node(state: MigrationState) -> MigrationState:
     """Convert a Java @Entity to a SQLAlchemy model."""
     return await _run_converter(state, model_converter_agent)
+
+
+def enum_converter_node(state: MigrationState) -> MigrationState:
+    """Convert a Java enum into a Python Enum deterministically."""
+    next_state = deepcopy(state)
+    current = next_state.get("current_conversion", {})
+    if not current:
+        return next_state
+
+    component = current.get("component", {})
+    output_dir = next_state.get("output_dir", "")
+    output_path = convert_enum(component, output_dir)
+    class_name = str(component.get("class_name", "UnknownEnum"))
+    checklist = next_state.get("migration_checklist", [])
+    if output_path:
+        result_dict = {
+            "component_name": class_name,
+            "component_type": "enum",
+            "output_path": output_path,
+            "passed": True,
+            "error": "",
+            "attempts": 1,
+            "tier_used": "deterministic",
+        }
+        completed = next_state.get("completed_conversions", [])
+        completed.append(result_dict)
+        next_state["completed_conversions"] = completed
+        next_state["generated_files"] = list(set(
+            next_state.get("generated_files", []) + [output_path]
+        ))
+        next_state["output_registry"] = {
+            **next_state.get("output_registry", {}),
+            class_name: output_path,
+        }
+        next_state["logs"] = [
+            *next_state.get("logs", []),
+            f"OK {class_name} (deterministic enum)",
+        ]
+    else:
+        result_dict = {
+            "component_name": class_name,
+            "component_type": "enum",
+            "output_path": "",
+            "passed": False,
+            "error": "Enum conversion produced no output",
+            "attempts": 1,
+            "tier_used": "deterministic",
+        }
+        failed = next_state.get("failed_conversions", [])
+        failed.append(result_dict)
+        next_state["failed_conversions"] = failed
+        next_state["logs"] = [
+            *next_state.get("logs", []),
+            f"FAIL {class_name}: enum conversion produced no output",
+        ]
+
+    next_state["migration_checklist"] = _update_checklist_item(
+        checklist,
+        component_type="enum",
+        class_name=class_name,
+        result=result_dict,
+    )
+    next_state["current_conversion"] = None
+    return next_state
 
 
 async def schema_converter_node(state: MigrationState) -> MigrationState:
@@ -282,35 +374,16 @@ def config_converter_node(state: MigrationState) -> MigrationState:
     ))
 
     # ── core/security.py ──
-    if "spring-security" in techs or "jwt" in techs:
-        _write("app/core/security.py", (
-            '"""JWT authentication dependencies."""\n\n'
-            "from fastapi import Depends, HTTPException, status\n"
-            "from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials\n\n"
-            "try:\n"
-            "    from jose import jwt, JWTError\n"
-            "except ImportError:\n"
-            "    jwt = None\n"
-            "    JWTError = Exception\n\n"
-            "from app.core.config import settings\n\n"
-            "security = HTTPBearer(auto_error=False)\n\n\n"
-            "async def get_current_user(\n"
-            "    credentials: HTTPAuthorizationCredentials | None = Depends(security),\n"
-            ") -> str:\n"
-            '    """Validate JWT and return user identifier."""\n'
-            "    if not credentials:\n"
-            '        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")\n'
-            "    try:\n"
-            "        payload = jwt.decode(\n"
-            '            credentials.credentials, settings.secret_key, algorithms=["HS256"]\n'
-            "        )\n"
-            '        user_id: str | None = payload.get("sub")\n'
-            "        if user_id is None:\n"
-            '            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")\n'
-            "        return user_id\n"
-            "    except JWTError:\n"
-            '        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")\n'
-        ))
+    _write("app/core/security.py", (
+        '"""Authentication dependency stub for migrated endpoints."""\n\n'
+        "from fastapi import HTTPException, Request, status\n\n\n"
+        "async def get_current_user(request: Request) -> str:\n"
+        '    """Extract a user identifier from request headers until auth is implemented."""\n'
+        '    user_id = request.headers.get("X-User-Id", "")\n'
+        "    if not user_id:\n"
+        '        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")\n'
+        "    return user_id\n"
+    ))
 
     # ── api/deps.py ──
     _write("app/api/deps.py", (
@@ -428,6 +501,18 @@ def config_converter_node(state: MigrationState) -> MigrationState:
     next_state["generated_files"] = list(set(
         next_state.get("generated_files", []) + generated
     ))
+    next_state["migration_checklist"] = _update_checklist_item(
+        next_state.get("migration_checklist", []),
+        component_type="config",
+        class_name="ProjectConfig",
+        result={
+            "passed": True,
+            "tier_used": "deterministic",
+            "error": "",
+            "attempts": 1,
+            "output_path": "app/main.py",
+        },
+    )
     next_state["current_conversion"] = None
     next_state["logs"] = [
         *next_state.get("logs", []),

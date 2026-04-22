@@ -33,6 +33,7 @@ def supervisor_node(state: MigrationState) -> MigrationState:
     comp_name = current.get("component", {}).get("class_name", "?")
     comp_type = current.get("type", "?")
     next_state["current_step"] = f"Converting {comp_name} ({comp_type})"
+    next_state["status"] = "migrating"
 
     # Update existing_generated_code context from already-written files
     output_dir = next_state.get("output_dir", "")
@@ -62,6 +63,7 @@ def route_to_converter(state: MigrationState) -> str:
     comp_type = current.get("type", "")
     converter_map = {
         "model": "model_converter",
+        "enum": "enum_converter",
         "schema": "schema_converter",
         "repo": "repo_converter",
         "service": "service_converter",

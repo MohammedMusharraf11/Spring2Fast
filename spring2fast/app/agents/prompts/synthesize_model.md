@@ -16,6 +16,9 @@ IMPLEMENTATION GUIDANCE
 JAVA SOURCE
 {java_source}
 
+TABLE AND INHERITANCE HINTS
+{table_hint}
+
 INHERITED FIELDS
 {inherited_fields}
 

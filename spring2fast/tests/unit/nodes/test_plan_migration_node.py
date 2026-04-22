@@ -50,3 +50,5 @@ def test_plan_migration_node_updates_state_and_artifact(tmp_path: Path) -> None:
     assert artifact_path.exists()
     assert "target_files" in result["metadata"]["migration_plan"]
     assert result["metadata"]["migration_plan"]["target_files"]
+    assert "migration_checklist" in result
+    assert any(item["id"] == "config:ProjectConfig" for item in result["migration_checklist"])

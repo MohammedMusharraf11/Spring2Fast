@@ -5,11 +5,12 @@ from pathlib import Path
 
 from app.agents.converter_agents.event_consumer_converter import event_consumer_converter_agent
 from app.agents.converter_agents.feign_converter import feign_converter_agent
-from app.agents.converter_agents.scheduler_converter import scheduler_converter_agent
 from app.agents.converter_agents.base import BaseConverterAgent
+from app.agents.converter_agents.model_converter import model_converter_agent
+from app.agents.converter_agents.scheduler_converter import scheduler_converter_agent
 from app.agents.generators.alembic_generator import AlembicGenerator
 from app.agents.generators.sandbox_tester import SandboxTester
-from app.agents.tools.converter_tools import parse_bean_validation
+from app.agents.tools.converter_tools import deterministic_convert, parse_bean_validation
 from app.agents.nodes.plan_migration import plan_migration_node
 
 
@@ -78,6 +79,38 @@ def test_plan_migration_node_queues_phase3_components(tmp_path: Path) -> None:
     assert "feign_client" in queue_types
     assert "event_consumer" in queue_types
     assert "scheduled_task" in queue_types
+
+
+def test_plan_migration_node_registers_exception_handler_in_core_package(tmp_path: Path) -> None:
+    state = {
+        "job_id": "job-phase3-plan-exception",
+        "source_type": "folder",
+        "source_url": str(tmp_path),
+        "workspace_dir": str(tmp_path),
+        "input_dir": str(tmp_path / "input"),
+        "artifacts_dir": str(tmp_path / "artifacts"),
+        "output_dir": str(tmp_path / "output"),
+        "status": "planning",
+        "current_step": "Planning",
+        "progress_pct": 50,
+        "logs": [],
+        "analysis_artifacts": {},
+        "discovered_technologies": ["spring-boot"],
+        "business_rules": [],
+        "generated_files": [],
+        "validation_errors": [],
+        "retry_count": 0,
+        "metadata": {
+            "docs_research": {"references": []},
+        },
+        "component_inventory": {
+            "exception_handlers": [{"class_name": "GlobalExceptionHandler"}],
+        },
+    }
+
+    result = asyncio.run(plan_migration_node(state))
+
+    assert result["output_registry"]["GlobalExceptionHandler"] == "app/core/global_exception_handler.py"
 
 
 def test_feign_converter_generates_httpx_client() -> None:
@@ -177,6 +210,42 @@ class ExampleService:
     assert "implemented" not in stubs
 
 
+def test_stub_model_detection_flags_pass_only_and_id_only_models() -> None:
+    pass_only = """
+class User:
+    pass
+"""
+    id_only = """
+class User:
+    __tablename__: str = "users"
+    id: int = 1
+"""
+    complete = """
+class User:
+    __tablename__: str = "users"
+    id: int = 1
+    email: str = "a@example.com"
+"""
+
+    assert BaseConverterAgent._has_stub_model(pass_only) is True
+    assert BaseConverterAgent._has_stub_model(id_only) is True
+    assert BaseConverterAgent._has_stub_model(complete) is False
+
+
+def test_relative_import_sanitizer_rewrites_local_imports() -> None:
+    code = """
+from .repositories import UserRepository
+from . import crud
+import .models as models
+"""
+
+    fixed = BaseConverterAgent._fix_relative_imports(code)
+
+    assert "from app.repositories import UserRepository" in fixed
+    assert "# FIXME: ambiguous relative import - from app.??? import crud" in fixed
+    assert "import app.models as models" in fixed
+
+
 def test_phase3_prompt_builders_include_context() -> None:
     feign_prompt = feign_converter_agent._build_llm_prompt(
         java_source="interface UserClient {}",
@@ -210,3 +279,60 @@ def test_phase3_prompt_builders_include_context() -> None:
     assert "consumer docs" in event_prompt
     assert "class CleanupService: pass" in scheduler_prompt
     assert "scheduler docs" in scheduler_prompt
+
+
+def test_model_converter_deterministic_entity_uses_component_field_metadata() -> None:
+    code = model_converter_agent._deterministic_convert(
+        component={
+            "class_name": "User",
+            "table_name": "users",
+            "all_fields": [
+                {
+                    "name": "id",
+                    "type": "Long",
+                    "annotations": [{"name": "Id"}, {"name": "GeneratedValue"}],
+                },
+                {
+                    "name": "email",
+                    "type": "String",
+                    "annotations": [{"name": "Column"}],
+                },
+            ],
+            "inheritance_strategy": "JOINED",
+        },
+        java_ir={
+            "classes": [
+                {
+                    "name": "User",
+                    "annotations": [{"name": "Entity"}],
+                    "fields": [],
+                }
+            ]
+        },
+        java_source="@Entity class User {}",
+    )
+
+    assert code is not None
+    assert '__tablename__ = "users"' in code
+    assert "email: Mapped[str] = mapped_column(String(255), nullable=False)" in code
+
+
+def test_deterministic_repository_generation_is_async() -> None:
+    code = deterministic_convert(
+        "repo",
+        {
+            "classes": [
+                {
+                    "name": "UserRepository",
+                    "kind": "interface",
+                    "methods": [{"name": "findById"}, {"name": "findAll"}],
+                }
+            ]
+        },
+    )
+
+    assert code is not None
+    assert "AsyncSession" in code
+    assert "async def get_by_id" in code
+    assert "await self.db.get" in code
+    assert "result = await self.db.execute(select(User))" in code

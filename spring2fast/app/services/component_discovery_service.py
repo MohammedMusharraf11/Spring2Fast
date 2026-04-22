@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from app.core.llm import get_analysis_model
 
 
 @dataclass(slots=True)
@@ -18,7 +23,10 @@ class ComponentDiscoveryResult:
 class ComponentDiscoveryService:
     """Discovers Spring Boot component categories from Java source files."""
 
-    CLASS_PATTERN = re.compile(r"\bclass\s+([A-Za-z0-9_]+)\b")
+    CLASS_PATTERN = re.compile(
+        r"^(?:public\s+)?(?:abstract\s+)?(?:final\s+)?class\s+([A-Z][A-Za-z0-9_]+)",
+        re.MULTILINE,
+    )
     METHOD_SIGNATURE_PATTERN = re.compile(
         r"(public|private|protected)\s+([A-Za-z0-9_<>,\[\]\s?]+?)\s+([A-Za-z0-9_]+)\s*\((.*?)\)\s*(?:\{|throws|$)",
     )
@@ -30,12 +38,13 @@ class ComponentDiscoveryService:
     JPQL_QUERY_PATTERN = re.compile(r'@Query\s*\((.*?)\)', re.DOTALL)
 
     CATEGORY_RULES = {
+        "exception_handlers": ["@ControllerAdvice", "@RestControllerAdvice"],
         "controllers": ["@RestController", "@Controller"],
         "services": ["@Service"],
         "repositories": ["@Repository"],
         "entities": ["@Entity"],
+        "enums": [],
         "dtos": ["dto"],
-        "exception_handlers": ["@ControllerAdvice", "@RestControllerAdvice"],
         "security": ["SecurityFilterChain", "@EnableWebSecurity", "WebSecurityConfigurerAdapter"],
         "configs": ["@Configuration"],
         "feign_clients": ["@FeignClient"],
@@ -78,10 +87,28 @@ class ComponentDiscoveryService:
                 "is_mapped_superclass": "@MappedSuperclass" in text,
             }
 
+        unclassified: list[dict[str, object]] = []
+        service_names = {
+            str(class_name)
+            for class_name, registry_item in class_registry.items()
+            if self._classify_component(
+                source_root / str(registry_item["file_path"]),
+                str(registry_item["text"]),
+            ) == "services"
+        }
+
         for item in class_registry.values():
             text = str(item["text"])
             file_path = source_root / str(item["file_path"])
             category = self._classify_component(file_path, text)
+            if category is None:
+                unclassified.append(
+                    {
+                        "class_name": item["class_name"],
+                        "file_path": item["file_path"],
+                        "source": text,
+                    }
+                )
 
             class_annotations, fields, method_details = self._extract_structure(text)
             request_mappings = self._extract_request_mappings(text)
@@ -105,13 +132,30 @@ class ComponentDiscoveryService:
                 "method_details": method_details,
                 "query_methods": query_methods,
                 "bean_validation_summary": self._build_validation_summary([*inherited_fields, *fields]),
+                "table_name": self._extract_table_name(text) if category == "entities" else None,
+                "inheritance_strategy": self._extract_inheritance_strategy(text) if category == "entities" else None,
+                "enum_values": self._extract_enum_values(text) if category == "enums" else [],
             }
+
+            if category == "controllers":
+                component_payload["dependencies"] = self._extract_injected_dependencies(text)
+                component_payload["service_calls"] = self._extract_service_method_calls(
+                    text,
+                    service_names,
+                )
 
             if bool(item["is_mapped_superclass"]):
                 components["mapped_superclasses"].append(component_payload)
 
             if category:
                 components[category].append(component_payload)
+
+        enriched_components = LLMComponentEnricher(self).enrich_unclassified(
+            unclassified=unclassified,
+            inventory=components,
+        )
+        for category, items in enriched_components.items():
+            components.setdefault(category, []).extend(items)
 
         artifact_path = artifact_dir / "03-component-inventory.md"
         artifact_path.write_text(self._render_markdown(components), encoding="utf-8")
@@ -143,6 +187,10 @@ class ComponentDiscoveryService:
     def _classify_component(self, file_path: Path, text: str) -> str | None:
         lowered_path = str(file_path).lower()
         lowered_text = text.lower()
+        annotations = set(self._extract_annotations(text))
+
+        if re.search(r"\benum\s+[A-Z]\w+\s*\{", text):
+            return "enums"
 
         if "interface " in text:
             for base in self.JPA_REPO_BASES:
@@ -151,7 +199,7 @@ class ComponentDiscoveryService:
 
         for category, markers in self.CATEGORY_RULES.items():
             for marker in markers:
-                if marker.startswith("@") and marker in text:
+                if marker.startswith("@") and marker in annotations:
                     return category
                 if marker.lower() in lowered_path or marker.lower() in lowered_text:
                     if category == "dtos" and "dto" not in lowered_path:
@@ -166,6 +214,55 @@ class ComponentDiscoveryService:
     def _extract_extends(self, text: str) -> str | None:
         match = self.EXTENDS_PATTERN.search(text)
         return match.group(1) if match else None
+
+    def _extract_table_name(self, text: str) -> str | None:
+        match = re.search(r'@Table\s*\(\s*name\s*=\s*"([^"]+)"', text)
+        return match.group(1) if match else None
+
+    def _extract_inheritance_strategy(self, text: str) -> str | None:
+        match = re.search(
+            r"@Inheritance\s*\(\s*strategy\s*=\s*InheritanceType\.(\w+)",
+            text,
+        )
+        return match.group(1) if match else None
+
+    def _extract_enum_values(self, text: str) -> list[str]:
+        values: list[str] = []
+        enum_body = re.search(r"enum\s+\w+[^{]*\{([^}]+)", text, re.DOTALL)
+        if not enum_body:
+            return values
+
+        body = enum_body.group(1).split(";", 1)[0]
+        for part in body.split(","):
+            candidate = part.strip()
+            if not candidate:
+                continue
+            match = re.match(r"([A-Z_0-9]+)", candidate)
+            if match:
+                values.append(match.group(1))
+        return values
+
+    def _extract_injected_dependencies(self, text: str) -> list[dict[str, str]]:
+        deps: list[dict[str, str]] = []
+        for field in self.FIELD_PATTERN.finditer(text):
+            field_type = field.group(2).strip()
+            field_name = field.group(3).strip()
+            if field_type and field_type[0].isupper() and field_type not in {
+                "String", "Long", "Integer", "Boolean", "List", "Map", "Set",
+            }:
+                deps.append({"name": field_name, "type": field_type})
+        return deps
+
+    def _extract_service_method_calls(self, text: str, service_names: set[str]) -> list[str]:
+        calls: set[str] = set()
+        for svc_name in service_names:
+            if not svc_name:
+                continue
+            var_name = svc_name[0].lower() + svc_name[1:]
+            pattern = re.compile(rf"\b{re.escape(var_name)}\.(\w+)\s*\(")
+            for match in pattern.finditer(text):
+                calls.add(match.group(1))
+        return sorted(calls)
 
     def _extract_structure(self, text: str) -> tuple[list[str], list[dict[str, object]], list[dict[str, object]]]:
         class_annotations: list[str] = []
@@ -405,8 +502,141 @@ class ComponentDiscoveryService:
                 if fields:
                     field_text = ", ".join(f"{field['name']}:{field['type']}" for field in fields[:8])
                     lines.append(f"  fields: {field_text}")
+                if item.get("table_name"):
+                    lines.append(f"  table_name: {item['table_name']}")
+                if item.get("inheritance_strategy"):
+                    lines.append(f"  inheritance_strategy: {item['inheritance_strategy']}")
+                enum_values = item.get("enum_values") or []
+                if enum_values:
+                    lines.append(f"  enum_values: {', '.join(enum_values[:12])}")
+                dependencies = item.get("dependencies") or []
+                if dependencies:
+                    dep_text = ", ".join(f"{dep['name']}:{dep['type']}" for dep in dependencies[:8])
+                    lines.append(f"  dependencies: {dep_text}")
+                service_calls = item.get("service_calls") or []
+                if service_calls:
+                    lines.append(f"  service_calls: {', '.join(service_calls[:8])}")
                 validations = item.get("bean_validation_summary") or []
                 if validations:
                     lines.append(f"  validations: {' | '.join(validations[:5])}")
             lines.append("")
         return "\n".join(lines) + "\n"
+
+
+class LLMComponentEnricher:
+    """Use an LLM to classify Java files that regex could not categorize."""
+
+    ROLE_TO_CATEGORY = {
+        "entity": "entities",
+        "dto": "dtos",
+        "service": "services",
+        "repository": "repositories",
+        "controller": "controllers",
+        "config": "configs",
+    }
+
+    CLASSIFICATION_PROMPT = (
+        "You are analyzing Java Spring Boot source files.\n"
+        "For each file, determine its role. Options:\n"
+        "  entity - domain object / DB model\n"
+        "  dto - request/response transfer object\n"
+        "  service - business logic class\n"
+        "  repository - data access layer\n"
+        "  controller - HTTP endpoint handler\n"
+        "  config - application configuration\n"
+        "  utility - helper/util, skip it\n"
+        "  unknown - truly unclear\n"
+        'Return ONLY JSON: {"filename": "role", ...}'
+    )
+
+    def __init__(self, service: ComponentDiscoveryService, model=None) -> None:
+        self.service = service
+        self.model = model or get_analysis_model()
+
+    @property
+    def enabled(self) -> bool:
+        return self.model is not None
+
+    def enrich_unclassified(
+        self,
+        *,
+        unclassified: list[dict[str, object]],
+        inventory: dict[str, list[dict[str, object]]],
+    ) -> dict[str, list[dict[str, object]]]:
+        if not self.enabled or not unclassified:
+            return {}
+
+        candidates = unclassified[:25]
+        files_block = "\n\n".join(
+            f"### {item['file_path']}\n{str(item['source'])[:600]}"
+            for item in candidates
+        )
+        try:
+            response = self.model.invoke([
+                SystemMessage(content=self.CLASSIFICATION_PROMPT),
+                HumanMessage(content=f"Files to classify:\n{files_block}"),
+            ])
+        except Exception:
+            return {}
+
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        mapping = self._parse_response(content)
+        existing_keys = {
+            (category, str(component.get("class_name")))
+            for category, items in inventory.items()
+            for component in items
+        }
+
+        enriched: dict[str, list[dict[str, object]]] = {}
+        for item in candidates:
+            role = mapping.get(str(item["file_path"]))
+            category = self.ROLE_TO_CATEGORY.get(role or "")
+            if not category:
+                continue
+            key = (category, str(item["class_name"]))
+            if key in existing_keys:
+                continue
+
+            source = str(item["source"])
+            class_annotations, fields, method_details = self.service._extract_structure(source)
+            payload = {
+                "class_name": item["class_name"],
+                "file_path": item["file_path"],
+                "methods": [detail["name"] for detail in method_details],
+                "request_mappings": self.service._extract_request_mappings(source),
+                "annotations": class_annotations or self.service._extract_annotations(source),
+                "fields": fields,
+                "inherited_fields": [],
+                "all_fields": fields,
+                "superclass_chain": [],
+                "extends": self.service._extract_extends(source),
+                "method_details": method_details,
+                "query_methods": self.service._extract_query_methods(method_details),
+                "bean_validation_summary": self.service._build_validation_summary(fields),
+                "table_name": self.service._extract_table_name(source) if category == "entities" else None,
+                "inheritance_strategy": (
+                    self.service._extract_inheritance_strategy(source)
+                    if category == "entities" else None
+                ),
+                "enum_values": [],
+            }
+            enriched.setdefault(category, []).append(payload)
+
+        return enriched
+
+    @staticmethod
+    def _parse_response(content: str) -> dict[str, str]:
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(
+                line for line in cleaned.splitlines() if not line.startswith("```")
+            ).strip()
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return {}
+        return {
+            str(key): str(value).strip().lower()
+            for key, value in parsed.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }

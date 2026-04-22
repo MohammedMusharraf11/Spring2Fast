@@ -20,6 +20,11 @@ from app.services.java_ast_parser import JavaASTParser
 
 _parser = JavaASTParser()
 
+_KNOWN_DEPS = {
+    "get_db": "app.db.session",
+    "get_current_user": "app.core.security",
+}
+
 
 # ─────────────────────────────────────────────
 # READ tools
@@ -147,7 +152,7 @@ def deterministic_convert(component_type: str, java_ir: dict[str, Any]) -> str |
 def _deterministic_entity(cls: dict[str, Any]) -> str:
     """Generate a SQLAlchemy model from an entity IR, including relationships."""
     name = cls.get("name", "Model")
-    table_name = _to_snake(name) + "s"
+    table_name = cls.get("table_name") or (_to_snake(name) + "s")
 
     # Check @Table annotation for explicit name
     for ann in cls.get("annotations", []):
@@ -156,7 +161,21 @@ def _deterministic_entity(cls: dict[str, Any]) -> str:
             if "name" in args:
                 table_name = args["name"].strip("\"'")
 
-    fields = cls.get("fields", [])
+    fields = list(cls.get("all_fields") or cls.get("fields", []))
+    has_pk = any(
+        "Id" in [annotation.get("name", "") for annotation in field.get("annotations", [])]
+        for field in fields
+        if isinstance(field, dict)
+    )
+    if not has_pk:
+        fields = [
+            {
+                "name": "id",
+                "type": "Long",
+                "annotations": [{"name": "Id"}, {"name": "GeneratedValue"}],
+            },
+            *fields,
+        ]
 
     # Detect if we need datetime import
     needs_datetime = any(
@@ -263,25 +282,26 @@ def _deterministic_repository(cls: dict[str, Any]) -> str:
 
     return (
         f'"""Auto-generated repository for {model_name}."""\n\n'
-        f"from sqlalchemy.orm import Session\n"
         f"from sqlalchemy import select\n"
+        f"from sqlalchemy.ext.asyncio import AsyncSession\n"
         f"from app.models.{snake} import {model_name}\n\n\n"
         f"class {model_name}Repository:\n"
         f'    """Repository for {model_name} CRUD operations."""\n\n'
-        f"    def __init__(self, db: Session) -> None:\n"
+        f"    def __init__(self, db: AsyncSession) -> None:\n"
         f"        self.db = db\n\n"
-        f"    def get_by_id(self, id: int) -> {model_name} | None:\n"
-        f"        return self.db.get({model_name}, id)\n\n"
-        f"    def get_all(self) -> list[{model_name}]:\n"
-        f"        return list(self.db.execute(select({model_name})).scalars().all())\n\n"
-        f"    def save(self, entity: {model_name}) -> {model_name}:\n"
+        f"    async def get_by_id(self, id: int) -> {model_name} | None:\n"
+        f"        return await self.db.get({model_name}, id)\n\n"
+        f"    async def get_all(self) -> list[{model_name}]:\n"
+        f"        result = await self.db.execute(select({model_name}))\n"
+        f"        return list(result.scalars().all())\n\n"
+        f"    async def save(self, entity: {model_name}) -> {model_name}:\n"
         f"        self.db.add(entity)\n"
-        f"        self.db.commit()\n"
-        f"        self.db.refresh(entity)\n"
+        f"        await self.db.commit()\n"
+        f"        await self.db.refresh(entity)\n"
         f"        return entity\n\n"
-        f"    def delete(self, entity: {model_name}) -> None:\n"
-        f"        self.db.delete(entity)\n"
-        f"        self.db.commit()\n"
+        f"    async def delete(self, entity: {model_name}) -> None:\n"
+        f"        await self.db.delete(entity)\n"
+        f"        await self.db.commit()\n"
     )
 
 

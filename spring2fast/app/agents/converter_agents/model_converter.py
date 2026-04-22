@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.converter_agents.base import BaseConverterAgent
+from app.agents.tools import converter_tools as tools
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
@@ -52,8 +53,26 @@ class ModelConverterAgent(BaseConverterAgent):
             for field in inherited_fields
         ) or "- none"
 
+        table_name = str(component.get("table_name") or "").strip()
+        inheritance = str(component.get("inheritance_strategy") or "").strip()
+        extends = str(component.get("extends") or "").strip()
+        table_hint = ""
+        if table_name:
+            table_hint += f"\nEXPLICIT TABLE NAME: {table_name} (use this exactly in __tablename__)"
+        if extends:
+            table_hint += (
+                f"\nINHERITANCE: This class extends {extends}. "
+                "You MUST include all inherited fields, especially the primary key `id`."
+            )
+        if inheritance:
+            table_hint += f"\nJPA STRATEGY: {inheritance}"
+        if not table_hint:
+            table_hint = "\nNo explicit table or inheritance hints."
+
         return template.replace(
             "{java_source}", java_source
+        ).replace(
+            "{table_hint}", table_hint
         ).replace(
             "{inherited_fields}", inherited_text
         ).replace(
@@ -61,6 +80,31 @@ class ModelConverterAgent(BaseConverterAgent):
         ).replace(
             "{existing_code}", existing_code.get("models", "# No existing models")
         )
+
+    def _deterministic_convert(
+        self,
+        *,
+        component: dict[str, Any],
+        java_ir: dict[str, Any],
+        java_source: str,
+    ) -> str | None:
+        classes = java_ir.get("classes", [])
+        if not classes:
+            return None
+
+        cls = classes[0]
+        raw_annotations = cls.get("annotations", [])
+        annotations = [
+            a.get("name", "") if isinstance(a, dict) else str(a)
+            for a in raw_annotations
+        ]
+        if "Entity" not in annotations and "@Entity" not in annotations:
+            return None
+
+        cls["all_fields"] = component.get("all_fields") or cls.get("fields", [])
+        cls["table_name"] = component.get("table_name")
+        cls["inheritance_strategy"] = component.get("inheritance_strategy")
+        return tools.deterministic_convert("model", java_ir)
 
 
 model_converter_agent = ModelConverterAgent()

@@ -1,4 +1,4 @@
-"""LLM synthesis for dynamic documentation research."""
+"""LLM enrichment for docs research — uses dedicated system prompt."""
 
 from __future__ import annotations
 
@@ -6,23 +6,25 @@ import asyncio
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.core.llm import get_chat_model
+from app.agents.prompt_loader import load_system_prompt
+from app.core.llm import get_analysis_model
 
 
 class DocsResearchLLMEnricher:
-    """Uses an LLM to select and summarize relevant docs candidates in batches."""
+    """Uses an LLM to select and summarize relevant docs candidates."""
 
     def __init__(self, model=None) -> None:
-        self.model = model or get_chat_model()
+        self.model = model or get_analysis_model()
+        self._system_prompt = load_system_prompt("system_docs_research")
 
     @property
     def enabled(self) -> bool:
         return self.model is not None
 
     async def enrich_batch(self, *, candidates: list[dict[str, Any]]) -> list[dict[str, str]]:
-        """Pick the best migration reference candidates (async, non-blocking)."""
+        """Pick the best migration reference candidates."""
         if not candidates:
             return []
 
@@ -37,17 +39,14 @@ class DocsResearchLLMEnricher:
                 for item in candidates
             ]
 
-        prompt = (
-            "You are selecting the best Python migration references for Java backend technologies.\n"
-            "Prefer official documentation and authoritative sources.\n"
-            "Return strict JSON as an array of objects with keys: java_technology, python_equivalent, official_docs, notes.\n"
-            "Do not invent URLs.\n\n"
-            f"Candidates: {json.dumps(candidates, ensure_ascii=False)}\n"
-        )
+        user_prompt = f"Candidates:\n{json.dumps(candidates, ensure_ascii=False)}\n"
 
         try:
             response = await asyncio.wait_for(
-                self.model.ainvoke([HumanMessage(content=prompt)]),
+                self.model.ainvoke([
+                    SystemMessage(content=self._system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]),
                 timeout=60.0,
             )
         except (asyncio.TimeoutError, Exception):

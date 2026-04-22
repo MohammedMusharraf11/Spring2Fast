@@ -1,4 +1,4 @@
-"""Optional LLM enrichment for business logic extraction."""
+"""LLM enrichment for business logic extraction — uses dedicated system prompt."""
 
 from __future__ import annotations
 
@@ -6,42 +6,39 @@ import asyncio
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.core.llm import get_chat_model
+from app.agents.prompt_loader import load_system_prompt
+from app.core.llm import get_analysis_model
 
 
 class BusinessLogicLLMEnricher:
     """Uses an LLM to summarize extracted business behavior."""
 
     def __init__(self, model=None) -> None:
-        self.model = model or get_chat_model()
+        self.model = model or get_analysis_model()
+        self._system_prompt = load_system_prompt("system_business_logic")
 
     @property
     def enabled(self) -> bool:
         return self.model is not None
 
     async def enrich(self, *, file_snapshot: str, extracted_rules: list[str]) -> dict[str, Any]:
-        """Return an optional business-logic summary (async, non-blocking)."""
+        """Return an optional business-logic summary."""
         if not self.enabled:
             return {"summary": None, "additional_rules": []}
 
-        prompt = (
-            "You are analyzing Java backend business logic for migration to FastAPI.\n"
-            "Given deterministic extracted rules and file snippets, summarize the key business behavior.\n"
-            "Return strict JSON with keys: summary, additional_rules.\n"
-            "Rules:\n"
-            "- summary should be a concise paragraph.\n"
-            "- additional_rules must be an array of short bullet-like strings.\n"
-            "- Only include behavior strongly supported by the file snapshot.\n\n"
+        user_prompt = (
             f"Extracted rules: {extracted_rules}\n"
-            "File snapshot:\n"
-            f"{file_snapshot}\n"
+            f"File snapshot:\n{file_snapshot}\n"
         )
 
         try:
             response = await asyncio.wait_for(
-                self.model.ainvoke([HumanMessage(content=prompt)]),
+                self.model.ainvoke([
+                    SystemMessage(content=self._system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]),
                 timeout=60.0,
             )
         except (asyncio.TimeoutError, Exception):

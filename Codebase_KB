@@ -1,0 +1,579 @@
+# Spring2Fast — Migration Pipeline Walkthrough
+
+> **Spring2Fast** is a multi-agent, LangGraph-orchestrated pipeline that converts Java Spring Boot applications into fully runnable Python FastAPI projects.
+
+---
+
+## Table of Contents
+1. [High-Level Architecture](#1-high-level-architecture)
+2. [API & Orchestration Layer](#2-api--orchestration-layer)
+3. [LangGraph DAG — The Main Graph](#3-langgraph-dag--the-main-graph)
+4. [Shared State Schema (`MigrationState`)](#4-shared-state-schema-migrationstate)
+5. [Pipeline Phases (Node by Node)](#5-pipeline-phases-node-by-node)
+6. [Migration Subgraph — The Supervisor Pattern](#6-migration-subgraph--the-supervisor-pattern)
+7. [Converter Agents — The 2-Tier Strategy](#7-converter-agents--the-2-tier-strategy)
+8. [LLM Routing & Model Strategy](#8-llm-routing--model-strategy)
+9. [Validation & Quality Assurance](#9-validation--quality-assurance)
+10. [Final Assembly & Output](#10-final-assembly--output)
+11. [Sandbox Testing](#11-sandbox-testing)
+12. [Frontend & Persistence](#12-frontend--persistence)
+13. [Key Design Decisions](#13-key-design-decisions)
+14. [File Reference Index](#14-file-reference-index)
+
+---
+
+## 1. High-Level Architecture
+
+```mermaid
+graph TB
+    subgraph "Frontend (Vite + React)"
+        UI["Spring2Fast UI"]
+    end
+
+    subgraph "FastAPI Backend"
+        API["API Layer<br/>/api/v1/migrate"]
+        ORC["MigrationOrchestrator"]
+        GRAPH["LangGraph DAG"]
+    end
+
+    subgraph "LLM Providers"
+        BDR["AWS Bedrock<br/>Llama 4 Maverick"]
+        GRQ["Groq<br/>Llama 4 Scout"]
+        GEM["Gemini Flash"]
+    end
+
+    subgraph "Persistence"
+        SUPA["Supabase<br/>(Job tracking)"]
+        FS["Filesystem<br/>(Workspace / Artifacts)"]
+    end
+
+    UI -->|"POST /github or /upload"| API
+    UI -->|"GET /status, /state"| API
+    API -->|"BackgroundTask"| ORC
+    ORC -->|"ainvoke / astream"| GRAPH
+    GRAPH -->|"LLM calls"| BDR
+    GRAPH -.->|"fallback"| GRQ
+    GRAPH -.->|"fallback"| GEM
+    ORC -->|"persist state"| FS
+    ORC -->|"update progress"| SUPA
+    API -->|"query jobs"| SUPA
+```
+
+The system is split into three layers:
+- **API Layer** — FastAPI endpoints that accept migration requests and serve status/results
+- **Orchestration Layer** — Thin wrapper that initializes state, streams the graph, and persists progress
+- **Agent Layer** — A LangGraph DAG with 11 nodes + an embedded supervisor subgraph for the actual code conversion
+
+---
+
+## 2. API & Orchestration Layer
+
+### API Endpoints — [migrate.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/api/v1/migrate.py)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/github` | POST | Start migration from a GitHub repo URL |
+| `/upload` | POST | Start migration from an uploaded ZIP |
+| `/{job_id}/status` | GET | Quick status + progress percentage |
+| `/{job_id}/state` | GET | Full state dump (logs, artifacts, conversions) |
+| `/{job_id}/result` | GET | Download the output ZIP |
+| `/{job_id}/artifacts` | GET | List all generated analysis artifacts |
+| `/{job_id}/source-tree` | GET | File tree of ingested Java source |
+| `/{job_id}/output-tree` | GET | File tree of generated Python output |
+| `/{job_id}/push-github` | POST | Push output to a new GitHub repo |
+| `/{job_id}/sandbox` | POST | Run live smoke tests on the generated app |
+
+### Orchestrator — [migration_orchestrator.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/migration_orchestrator.py)
+
+The `MigrationOrchestrator` is intentionally thin:
+
+1. Builds the compiled LangGraph with `build_migration_graph()`
+2. Constructs the `initial_state` dict with job metadata
+3. Streams the graph via `astream(state, stream_mode="values")`
+4. After each node completion:
+   - Persists state to `_state.json` (for frontend polling)
+   - Updates Supabase `migration_jobs` table (status, progress_pct, current_step)
+5. On error: marks the job as `failed` in Supabase
+6. On success: records output ZIP path and `completed_at` timestamp
+
+---
+
+## 3. LangGraph DAG — The Main Graph
+
+[graph.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/graph.py)
+
+```
+                     ┌── tech_discover ──────────┐
+     ingest ─────────┼── biz_logic ──────────────┼── merge_analysis
+                     └── discover_components ────┘          │
+                                                            ▼
+                                                 research_docs → analyze → plan
+                                                            │
+                                               ┌────────────▼──────────────┐
+                                               │  MIGRATION SUBGRAPH       │
+                                               │  supervisor → converters  │
+                                               │  → quality_gate → exit    │
+                                               └────────────┬──────────────┘
+                                                            │
+                                                 validate ─┬─ always → assemble → END
+```
+
+### 11 Registered Nodes
+
+| Node | Type | Purpose |
+|------|------|---------|
+| `ingest` | sync | Clone repo / extract ZIP / copy folder into workspace |
+| `tech_discover` | async | Scan for Java technologies (Spring Security, JPA, Kafka, etc.) |
+| `extract_business_logic` | async | LLM-enriched extraction of business rules from service classes |
+| `discover_components` | sync | Regex-based classification of all Java classes + contract generation |
+| `merge_analysis` | sync | Fan-in checkpoint — cross-references parallel analysis results |
+| `research_docs` | async | Maps Java techs to official Python lib documentation (Serper/MCP) |
+| `analyze` | sync | Architecture dependency analysis |
+| `plan` | async | LLM-powered migration plan + builds the conversion queue |
+| `migrate` | **subgraph** | Supervisor+converter agents (see §6) |
+| `validate` | async | 6-layer validation of generated code |
+| `assemble` | sync | Infrastructure scaffolding, Docker, Alembic, tests, ZIP packaging |
+
+### Edge Wiring
+
+- **Fan-out**: `ingest` → `[tech_discover, extract_business_logic, discover_components]` (parallel)
+- **Fan-in**: All three → `merge_analysis` (LangGraph reducers merge state)
+- **Sequential**: `merge_analysis` → `research_docs` → `analyze` → `plan` → `migrate` → `validate` → `assemble` → END
+- `validate` always routes to `assemble` (no retry loops at the outer level)
+
+---
+
+## 4. Shared State Schema (`MigrationState`)
+
+[state.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/state.py)
+
+The state is a `TypedDict` with **Annotated reducers** that tell LangGraph how to merge partial state updates from parallel branches:
+
+| Field | Reducer | Purpose |
+|-------|---------|---------|
+| `job_id`, `source_url`, `workspace_dir` | `_latest_any` | Identity fields (set once) |
+| `status`, `current_step` | `_latest_str` | Human-readable progress |
+| `progress_pct` | `_latest_int` (max) | Always takes the highest value |
+| `logs` | `_dedupe_list` | Concatenate + deduplicate across branches |
+| `discovered_technologies`, `business_rules`, `generated_files` | `_dedupe_list` | Merge collections from parallel nodes |
+| `analysis_artifacts`, `metadata` | `_merge_dicts` | Deep-merge nested dicts |
+| `component_inventory` | `_merge_dicts` | Structured component registry |
+| `conversion_queue`, `completed_conversions`, `failed_conversions`, `current_conversion` | **`_always_latest`** | Supervisor signal fields — `None`/`[]` are meaningful |
+
+> [!IMPORTANT]
+> The supervisor subgraph fields use `_always_latest` (not `_latest_any`) because `None` and `[]` are meaningful signals. Using `_latest_any` would silently keep stale values and cause the supervisor loop to never exit.
+
+---
+
+## 5. Pipeline Phases (Node by Node)
+
+### Phase 1: Ingestion (10%)
+
+[ingest.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/ingest.py) → [ingestion_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/ingestion_service.py)
+
+Creates a predictable workspace layout:
+```
+workspace/{job_id}/
+├── input/       ← cloned repo / extracted ZIP / copied folder  
+├── artifacts/   ← analysis markdown files, state JSON, contracts
+└── output/      ← generated FastAPI project
+```
+
+Supports three source types: `github` (git clone), `upload` (ZIP extraction), `folder` (directory copy).
+
+### Phase 2: Parallel Analysis (25–45%)
+
+Three nodes fire simultaneously after ingestion:
+
+#### 2a. Technology Discovery
+[tech_discover.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/tech_discover.py) → [technology_inventory_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/technology_inventory_service.py)
+
+- Scans `pom.xml` / `build.gradle` for dependencies
+- Identifies build systems, JPA providers, message brokers, security frameworks
+- Counts Java files, detects database types
+- Writes `01-technology-inventory.md` artifact
+
+#### 2b. Business Logic Extraction
+[extract_business_logic.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/extract_business_logic.py) → [business_logic_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/business_logic_service.py)
+
+- LLM-enriched analysis of service classes
+- Extracts business rule hints (validation, persistence, transformations)
+- Writes `02-business-rules.md` artifact
+
+#### 2c. Component Discovery + Contract Generation
+[discover_components.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/discover_components.py) → [component_discovery_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/component_discovery_service.py) + [business_logic_contract_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/business_logic_contract_service.py)
+
+This is the **most critical analysis node**. It:
+
+1. **Classifies every `.java` file** into categories using annotation/keyword rules:
+   - `@RestController` → controllers
+   - `@Service` → services
+   - `@Entity` → entities
+   - `extends JpaRepository` → repositories
+   - `@FeignClient` → feign_clients
+   - `@KafkaListener`/`@RabbitListener` → event_handlers
+   - `@Scheduled` → scheduled_tasks
+   - DTOs, configs, security, exception handlers, etc.
+
+2. **Extracts structural metadata** per component:
+   - Methods (name, return type, parameters, annotations, raw body)
+   - Fields (name, type, annotations, Bean Validation constraints)
+   - Superclass chain + inherited fields
+   - Request mappings, JPQL `@Query` annotations
+
+3. **Generates per-component business logic contracts** (`contracts/` directory):
+   - Structured `.md` files with dependencies, method signatures, business rules, side effects, error conditions
+   - The [Java AST parser](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/java_ast_parser.py) uses `javalang` with regex fallback to extract method bodies
+   - Contracts feed into both LLM synthesis and validation compliance checking
+
+4. **Writes `ground_truth.json`** for evaluation scoring
+
+### Phase 3: Merge + Research + Analysis (45–50%)
+
+#### Merge Analysis
+[merge_analysis.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/merge_analysis.py)
+
+Fan-in checkpoint. LangGraph's reducers have already merged the parallel branch outputs. This node cross-references totals and logs a summary.
+
+#### Docs Research
+[research_docs.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/research_docs.py) → [docs_research_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/docs_research_service.py)
+
+- Maps each discovered Java technology to its Python-equivalent library
+- Optionally uses Serper search or MCP docs server for official documentation snippets
+- Writes `04-integration-mapping.md` artifact
+- This context is injected into every converter agent's LLM prompt
+
+#### Analyze
+[analyze.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/analyze.py) → [analysis_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/analysis_service.py)
+
+- Builds a dependency graph (which layers depend on what)
+- Writes `05-architecture-analysis.md` artifact
+
+### Phase 4: Migration Planning (40%)
+
+[plan_migration.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/plan_migration.py) → [migration_planning_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/migration_planning_service.py)
+
+This is the **bridge between analysis and code generation**. It:
+
+1. Creates an LLM-assisted migration plan (target files, steps, risk items)
+2. **Builds a dependency-ordered conversion queue** from the component inventory:
+   ```
+   models → schemas → repositories → services → controllers 
+   → exception_handlers → feign_clients → event_consumers 
+   → scheduled_tasks → config
+   ```
+3. Predicts output file paths for each component (e.g., `UserService` → `app/services/user.py`)
+4. Initializes an `output_registry` mapping class names to their predicted paths (used for import resolution)
+5. Sets up the subgraph state fields: `conversion_queue`, `completed_conversions`, `failed_conversions`, `current_conversion`
+
+---
+
+## 6. Migration Subgraph — The Supervisor Pattern
+
+[migration_subgraph/graph.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/graph.py)
+
+The `migrate` node in the main DAG is actually a **compiled subgraph**:
+
+```mermaid
+graph LR
+    SUP["supervisor"] -->|"route"| MC["model_converter"]
+    SUP -->|"route"| SC["schema_converter"]
+    SUP -->|"route"| RC["repo_converter"]
+    SUP -->|"route"| SVC["service_converter"]
+    SUP -->|"route"| CC["controller_converter"]
+    SUP -->|"route"| EC["exception_converter"]
+    SUP -->|"route"| FC["feign_converter"]
+    SUP -->|"route"| ECC["event_consumer_converter"]
+    SUP -->|"route"| SKC["scheduler_converter"]
+    SUP -->|"route"| CFG["config_converter"]
+    SUP -->|"queue empty"| QG["quality_gate"]
+    
+    MC --> SUP
+    SC --> SUP
+    RC --> SUP
+    SVC --> SUP
+    CC --> SUP
+    EC --> SUP
+    FC --> SUP
+    ECC --> SUP
+    SKC --> SUP
+    CFG --> SUP
+    
+    QG -->|"exit"| END["END"]
+    QG -->|"retry"| SUP
+```
+
+### Supervisor — [supervisor.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/supervisor.py)
+
+The supervisor is a **pure function** (not an LLM agent). Each invocation:
+1. Pops the next component from `conversion_queue`
+2. Sets `current_conversion` to that component
+3. Reads already-generated code from the output directory (for cross-layer context)
+4. Routes deterministically via `route_to_converter()` based on component type
+
+### Quality Gate — [quality_gate.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/quality_gate.py)
+
+Triggered when the queue is empty. It:
+- Counts passed/failed conversions
+- If failures exist and `retry_count < 2`: re-queues failed components, increments retry counter, routes back to supervisor
+- If all passed or retries exhausted: exits the subgraph
+
+---
+
+## 7. Converter Agents — The 2-Tier Strategy
+
+[converter_agents/base.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/base.py)
+
+Every converter agent follows the same `BaseConverterAgent` inner loop:
+
+```mermaid
+flowchart TD
+    A["Read Java Source"] --> B["Read Contract (.md)"]
+    B --> C["Parse to IR (javalang/regex)"]
+    C --> D{"Tier 1: Deterministic?"}
+    D -->|"Yes"| E["Generate code via templates"]
+    D -->|"No"| F{"LLM Available?"}
+    F -->|"No"| G["Generate TODO scaffold"]
+    F -->|"Yes"| H["Tier 2: LLM Synthesis"]
+    
+    E --> I["Syntax Check"]
+    G --> I
+    H --> I
+    
+    I -->|"Fail"| J["LLM Self-Correct"]
+    J --> I
+    I -->|"Pass"| K["Check Imports"]
+    K --> L{"Stub Methods?"}
+    L -->|"Yes"| J
+    L -->|"No"| M["Resolve Imports + Write Output"]
+```
+
+### Tier 1: Deterministic Conversion
+
+[converter_tools.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/tools/converter_tools.py)
+
+Used for simple, pattern-matchable components:
+- `@Entity` with only basic fields → SQLAlchemy model with `Mapped` columns, ForeignKey relationships
+- Repository interface with ≤2 methods → Basic CRUD repository class
+
+Includes:
+- **Java type → SQLAlchemy column mapping** (String→String(255), Long→Integer, LocalDateTime→DateTime, etc.)
+- **JPA relationship handling** (ManyToOne→ForeignKey+relationship, OneToMany→relationship, ManyToMany→secondary table)
+- **JPQL → SQLAlchemy translation** via the [JPQLTranslator](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/tools/jpql_translator.py)
+
+### Tier 2: LLM Synthesis
+
+When deterministic conversion isn't possible (complex services, controllers with business logic):
+
+1. Loads the specialized prompt template from [prompts/](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/prompts)
+2. Injects context: Java source, contract, existing generated code, docs, technologies
+3. Calls the LLM with strict system instructions (no markdown fences, only valid Python, `app.` package root)
+4. Strips fences, sanitizes placeholder imports
+
+### Inner Validation Loop (up to 3 retries for services)
+
+After LLM generates code:
+1. **Syntax check** via `ast.parse()` — if fails, asks LLM to fix
+2. **Import resolution** — rewrites imports using the `output_registry` mapping
+3. **Stub detection** — for services/controllers/repos, AST-walks to find methods with empty bodies (`pass`, `return None`, `raise NotImplementedError`) and forces LLM retry with explicit error message
+
+### Converter Agent Registry
+
+| Agent | Source | Target | Key Features |
+|-------|--------|--------|-------------|
+| [model_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/model_converter.py) | `@Entity` | SQLAlchemy model | Deterministic for simple entities |
+| [schema_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/schema_converter.py) | DTO classes | Pydantic schemas | Bean Validation → Field validators |
+| [repo_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/repo_converter.py) | `JpaRepository` | SQLAlchemy repo | JPQL translation, query method names |
+| [service_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/service_converter.py) | `@Service` | Python service class | 3 inner retries, cross-layer context |
+| [controller_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/controller_converter.py) | `@RestController` | FastAPI router | Request mapping translation |
+| [exception_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/exception_converter.py) | `@ControllerAdvice` | Exception handlers | Maps to FastAPI exception_handler |
+| [feign_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/feign_converter.py) | `@FeignClient` | httpx async client | External service calls |
+| [event_consumer_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/event_consumer_converter.py) | `@KafkaListener` / `@RabbitListener` | Async consumers | aiokafka / aio-pika |
+| [scheduler_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/scheduler_converter.py) | `@Scheduled` | APScheduler jobs | Cron/interval translation |
+| [config_converter](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/converter_nodes.py#L158-L436) | — | Infrastructure files | **Deterministic, no LLM** |
+
+### Config Converter (Special Case)
+
+The config converter is the only one that runs **without an LLM**. It generates all infrastructure files deterministically:
+
+- `app/main.py` — FastAPI entry point with CORS, lifespan, scheduler
+- `app/core/config.py` — Pydantic Settings (adapts to discovered tech: Redis URL, Kafka bootstrap, Feign client URLs)
+- `app/db/session.py` + `app/db/base.py` — Async SQLAlchemy engine/session
+- `app/api/v1/router.py` — Auto-imports all discovered controllers
+- `requirements.txt` — Dynamically includes packages based on discovered technologies
+- `app/core/security.py` — JWT auth stubs (only if Spring Security detected)
+- All `__init__.py` package files
+
+---
+
+## 8. LLM Routing & Model Strategy
+
+[core/llm.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/core/llm.py)
+
+```
+┌─────────────────────────┬──────────────────────────────┬────────────────────────────┐
+│ Task                    │ Model                        │ Why                        │
+├─────────────────────────┼──────────────────────────────┼────────────────────────────┤
+│ Code generation         │ Bedrock Llama 4 Maverick     │ No RPM limits, strong code │
+│ Analysis / Planning     │ Bedrock → Groq → Gemini      │ Safe for parallel nodes    │
+└─────────────────────────┴──────────────────────────────┴────────────────────────────┘
+```
+
+**Fallback chain**: Bedrock → Groq Llama 4 Scout → Gemini 2.0 Flash
+
+> [!NOTE]
+> Bedrock is preferred over Groq because 3 parallel analysis nodes all fire LLM calls simultaneously. Groq's free tier (30 RPM) would 429 instantly. Bedrock has no RPM cap (pay-per-token).
+
+When neither Bedrock nor Groq is available, the code LLM is `None` — converter agents fall back to generating **TODO scaffold** files (valid Python with stub methods).
+
+A 3-second throttle is applied between converter agent calls when using Groq to stay under the 30 RPM limit.
+
+---
+
+## 9. Validation & Quality Assurance
+
+[validation_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/validation_service.py)
+
+The validation node runs 6 checks on the generated output:
+
+| # | Check | Method | Severity |
+|---|-------|--------|----------|
+| 1 | **Syntax** | `ast.parse()` on every `.py` file | Fatal |
+| 2 | **Lint** | `ruff check --select=E,F,I` | F-errors fatal, E-warnings non-fatal |
+| 3 | **Import resolution** | Checks every `from app.` import against generated module index + stdlib + requirements.txt | Fatal |
+| 4 | **Structural integrity** | Every entity/service/controller/repo in inventory has a matching generated file | Fatal |
+| 5 | **Core files** | `app/main.py` and `requirements.txt` must exist | Fatal |
+| 6 | **Contract compliance** | LLM-as-judge: generated code is checked against business logic contracts | Fatal |
+
+Writes `08-validation-report.md` with a checks summary table.
+
+> [!IMPORTANT]
+> Validation **never blocks** the pipeline. Errors are logged and the pipeline always proceeds to assembly. The design philosophy: deliver ALL migrated code, even if imperfect — the user can manually fix issues.
+
+---
+
+## 10. Final Assembly & Output
+
+[assemble.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/assemble.py)
+
+The assemble node post-processes the generated project:
+
+1. **Sanitize imports** — Replaces placeholder package names (`yourapp`, `myapp`) with `app`
+2. **Backfill infrastructure** — Generates any missing core files (db/base.py, db/session.py, deps.py, security.py)
+3. **Docker scaffolding** — [docker_generator.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/generators/docker_generator.py): Dockerfile, docker-compose.yml
+4. **Alembic scaffolding** — [alembic_generator.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/generators/alembic_generator.py): Migration config + initial migration
+5. **Test scaffolding** — [test_generator.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/generators/test_generator.py): pytest fixtures + test stubs for each component
+6. **ZIP packaging** — Archives the entire output directory as `fastapi_project_{job_id}.zip`
+
+---
+
+## 11. Sandbox Testing
+
+[sandbox_tester.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/generators/sandbox_tester.py)
+
+An optional post-migration step (triggered via `POST /{job_id}/sandbox`):
+
+1. Finds a free port on localhost
+2. Starts the generated app with `uvicorn app.main:app`
+3. Waits for `/openapi.json` to become available (45s timeout)
+4. **Auto-probes every route** from the OpenAPI spec:
+   - Generates sample request bodies from JSON schemas
+   - Fills path/query parameters with heuristic values
+   - Classifies responses: `2xx`=pass, `401/403/404/422`=warn, other=fail
+5. Writes `sandbox_report.json` with per-route verdicts, latency, and an overall score
+
+---
+
+## 12. Frontend & Persistence
+
+### Supabase (Job Tracking)
+- [supabase_client.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/supabase_client.py) provides a `get_supabase()` singleton
+- The `migration_jobs` table stores: id, source_type, source_url, branch, status, current_step, progress_pct, error_message, output_path, created_at, completed_at
+- Progress is updated both from the orchestrator (per-node) and from converter nodes (per-component via `_push_progress()`)
+
+### Filesystem (State & Artifacts)
+- `workspace/{job_id}/artifacts/_state.json` — Full serialized `MigrationState` for frontend polling
+- Analysis artifacts are numbered markdown files: `01-technology-inventory.md`, `02-business-rules.md`, `03-component-inventory.md`, etc.
+- `workspace/{job_id}/contracts/` — Per-component business logic contracts
+
+### Frontend
+- Vite + React app in [spring2fast-ui/](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast-ui)
+- Polls `/state` endpoint for real-time progress visualization
+- Displays source/output file trees, artifacts with markdown rendering
+
+---
+
+## 13. Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Supervisor is a pure function, not an LLM agent** | Routing is deterministic by component type — no need to waste LLM calls on routing decisions |
+| **Inner validation loop in converter agents** | Catches ~80% of issues cheaply before the expensive quality gate retry |
+| **Stub method detection forces LLM retry** | LLMs sometimes generate syntactically valid but functionally empty code; AST-walking detects this |
+| **`_always_latest` reducer for subgraph fields** | `None`/`[]` are meaningful exit signals; `_latest_any` would silently ignore them |
+| **Bedrock-first LLM routing** | Eliminates rate-limit issues during parallel analysis and dense conversion phases |
+| **Validation never blocks assembly** | Philosophy: deliver all code, report issues; user manually fixes. Re-migration loops proved brittle |
+| **Business logic contracts** | Structured `.md` files are more reliable than flat rules lists for LLM synthesis context |
+| **Dependency-ordered conversion queue** | Models before schemas before repos before services before controllers — ensures cross-layer imports resolve |
+
+---
+
+## 14. File Reference Index
+
+### Core Pipeline
+| File | Role |
+|------|------|
+| [graph.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/graph.py) | Main LangGraph DAG definition |
+| [state.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/state.py) | Shared `MigrationState` TypedDict with reducers |
+| [migration_orchestrator.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/migration_orchestrator.py) | Orchestration + persistence layer |
+| [config.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/config.py) | Application settings (Pydantic) |
+
+### Nodes
+| File | Node |
+|------|------|
+| [ingest.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/ingest.py) | Source ingestion |
+| [tech_discover.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/tech_discover.py) | Technology scanning |
+| [extract_business_logic.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/extract_business_logic.py) | Business rules extraction |
+| [discover_components.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/discover_components.py) | Component discovery + contracts |
+| [merge_analysis.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/merge_analysis.py) | Fan-in merge |
+| [research_docs.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/research_docs.py) | Docs research |
+| [analyze.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/analyze.py) | Architecture analysis |
+| [plan_migration.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/plan_migration.py) | Migration planning + queue |
+| [validate.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/validate.py) | Multi-layer validation |
+| [assemble.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/nodes/assemble.py) | Final assembly + ZIP |
+
+### Subgraph
+| File | Role |
+|------|------|
+| [migration_subgraph/graph.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/graph.py) | Subgraph definition |
+| [supervisor.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/supervisor.py) | Queue popping + routing |
+| [converter_nodes.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/converter_nodes.py) | Node wrappers + config converter |
+| [quality_gate.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/migration_subgraph/quality_gate.py) | Retry/exit logic |
+
+### Converter Agents
+| File | Role |
+|------|------|
+| [base.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/base.py) | Base agent with inner loop |
+| [service_converter.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/service_converter.py) | Service conversion (most complex) |
+| [controller_converter.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/controller_converter.py) | Controller → FastAPI router |
+| [repo_converter.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/repo_converter.py) | Repository conversion |
+| [model_converter.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/converter_agents/model_converter.py) | Entity → SQLAlchemy model |
+
+### Services
+| File | Role |
+|------|------|
+| [component_discovery_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/component_discovery_service.py) | Spring Boot component classifier |
+| [business_logic_contract_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/business_logic_contract_service.py) | Contract `.md` generator |
+| [java_ast_parser.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/java_ast_parser.py) | Java IR parser (javalang + regex) |
+| [validation_service.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/services/validation_service.py) | 6-layer validation |
+
+### Tools
+| File | Role |
+|------|------|
+| [converter_tools.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/tools/converter_tools.py) | Shared tools (read/parse/generate/validate/write) |
+| [jpql_translator.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/agents/tools/jpql_translator.py) | JPQL → SQLAlchemy translator |
+
+### LLM
+| File | Role |
+|------|------|
+| [llm.py](file:///c:/Users/Musharraf/Documents/Gen-AI/spring2fast/app/core/llm.py) | 3-tier model routing (Bedrock → Groq → Gemini) |

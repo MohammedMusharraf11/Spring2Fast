@@ -15,12 +15,14 @@ catching ~80% of issues without the expensive full-pipeline retry.
 from __future__ import annotations
 
 import asyncio
+import ast
 import re
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.agents.prompt_loader import load_system_prompt
 from app.agents.tools import converter_tools as tools
 from app.core.llm import get_code_model
 
@@ -77,6 +79,30 @@ class BaseConverterAgent:
 
     def __init__(self) -> None:
         self.llm = get_code_model()
+        self._fix_prompt = load_system_prompt("system_code_fix")
+        # Per-component system prompt is loaded from the synthesize_*.md file
+        # Each subclass provides _get_prompt_template_path()
+        try:
+            prompt_path = self._get_prompt_template_path()
+            if prompt_path.exists():
+                self._system_prompt = prompt_path.read_text(encoding="utf-8").strip()
+            else:
+                self._system_prompt = self._default_system_prompt()
+        except NotImplementedError:
+            self._system_prompt = self._default_system_prompt()
+
+    @staticmethod
+    def _default_system_prompt() -> str:
+        return (
+            "You are converting Java Spring Boot code to Python FastAPI.\n"
+            "Output ONLY valid Python code. No markdown fences, no explanations.\n"
+            "The Python package root is 'app'. "
+            "All internal imports MUST use 'from app.' prefix.\n"
+            "CRITICAL: Never use relative imports (from . import X or from .module import X). "
+            "Always use absolute imports starting with 'from app.'. "
+            "Example: use 'from app.models.user import User', not 'from . import User'.\n"
+            "Do NOT invent methods, classes, or imports that are not in the source."
+        )
 
     async def convert(
         self,
@@ -203,6 +229,19 @@ class BaseConverterAgent:
                         result.code = code
                         break
 
+                if component_type == "model" and self._has_stub_model(code):
+                    if attempt < self.MAX_INNER_RETRIES:
+                        code = await self._fix_code(
+                            code,
+                            "INCOMPLETE: Model has no columns beyond placeholder. "
+                            "Add all fields from the Java @Entity source. "
+                            "Do not return pass-only models or id-only placeholders.",
+                        )
+                        continue
+                    result.error = "Incomplete implementation: stub model remains after retries"
+                    result.code = code
+                    break
+
                 # Passed inner validation
                 output_path = self._get_output_path(component)
                 code = self._resolve_imports(
@@ -290,18 +329,13 @@ class BaseConverterAgent:
 
         try:
             response = await self.llm.ainvoke([
-                SystemMessage(content=(
-                    "You are an expert migration architect converting Java Spring Boot "
-                    "to Python FastAPI. Output ONLY valid Python code. "
-                    "No markdown fences, no explanations, no commentary. "
-                    "IMPORTANT: The Python package root is 'app'. "
-                    "All internal imports MUST use 'from app.' or 'import app.'. "
-                    "NEVER use placeholder names like 'yourapp', 'myapp', 'project', or 'src' in imports."
-                )),
+                SystemMessage(content=self._system_prompt),
                 HumanMessage(content=prompt),
             ])
             content = response.content if isinstance(response.content, str) else str(response.content)
-            return self._strip_fences(self._sanitize_imports(content))
+            return self._fix_relative_imports(
+                self._strip_fences(self._sanitize_imports(content))
+            )
         except asyncio.CancelledError:
             # Groq/API rate limit retry was cancelled — don't crash the pipeline
             return "# LLM call cancelled (rate limit/timeout) — manual conversion needed\npass\n"
@@ -317,12 +351,7 @@ class BaseConverterAgent:
             return broken_code
         try:
             response = await self.llm.ainvoke([
-                SystemMessage(content=(
-                    "Fix the Python code and return ONLY valid Python code. "
-                    "Preserve all methods. If the error mentions incomplete or stub "
-                    "implementations, replace every stub with a real implementation "
-                    "grounded in the existing code and Java source intent."
-                )),
+                SystemMessage(content=self._fix_prompt),
                 HumanMessage(content=f"ERROR: {error}\n\nCODE:\n{broken_code}"),
             ])
             content = response.content if isinstance(response.content, str) else str(response.content)
@@ -363,6 +392,10 @@ class BaseConverterAgent:
                 ]
                 replacement_module = module
                 for imported_name in imported_names:
+                    known_dep = tools._KNOWN_DEPS.get(imported_name)
+                    if known_dep:
+                        replacement_module = known_dep
+                        break
                     target = output_registry.get(imported_name)
                     if target:
                         replacement_module = target.removesuffix(".py").replace("/", ".")
@@ -403,6 +436,29 @@ class BaseConverterAgent:
                 'app',
                 code,
             )
+        return code
+
+    @staticmethod
+    def _fix_relative_imports(code: str) -> str:
+        """Rewrite or flag relative imports so output matches the flat app package."""
+        code = re.sub(
+            r"^from \.([a-z_][a-z0-9_\.]*) import (.+)$",
+            r"from app.\1 import \2",
+            code,
+            flags=re.MULTILINE,
+        )
+        code = re.sub(
+            r"^from \. import (.+)$",
+            r"# FIXME: ambiguous relative import - from app.??? import \1",
+            code,
+            flags=re.MULTILINE,
+        )
+        code = re.sub(
+            r"^import \.([a-z_][a-z0-9_\.]*)(\s+as\s+\w+)?$",
+            r"import app.\1\2",
+            code,
+            flags=re.MULTILINE,
+        )
         return code
 
     @staticmethod
@@ -453,6 +509,42 @@ class BaseConverterAgent:
                 stubs.append(node.name)
 
         return stubs
+
+    @staticmethod
+    def _has_stub_model(code: str) -> bool:
+        """True when a generated model is effectively empty or id-only."""
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+
+            body_stmts = [
+                stmt for stmt in node.body
+                if not (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                )
+            ]
+            if body_stmts and all(isinstance(stmt, ast.Pass) for stmt in body_stmts):
+                return True
+
+            assigns = [stmt for stmt in body_stmts if isinstance(stmt, ast.AnnAssign)]
+            non_placeholder_assigns = [
+                stmt for stmt in assigns
+                if not (
+                    isinstance(stmt.target, ast.Name)
+                    and stmt.target.id in {"id", "__tablename__"}
+                )
+            ]
+            if assigns and not non_placeholder_assigns and len(assigns) <= 2:
+                return True
+
+        return False
 
     @staticmethod
     def _strip_fences(content: str) -> str:

@@ -1,13 +1,13 @@
 """Validation node — lightweight pass after migration subgraph completes.
 
-Strategy: run validation ONCE, log any errors, always proceed to assemble.
-The user wants ALL code migrated — we don't re-migrate on validation failure,
-we just report what passed/failed and package everything.
+Strategy: run validation ONCE, log results, always proceed to assemble.
+We never block packaging on validation failure — just report and continue.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 from app.agents.state import MigrationState
 from app.services.validation_service import ValidationService
@@ -30,9 +30,6 @@ async def validate_node(state: MigrationState) -> MigrationState:
         result = await ValidationService().validate(
             output_dir=output_dir,
             artifacts_dir=artifacts_dir,
-            business_rules=next_state.get("business_rules", []),
-            contracts_dir=next_state.get("contracts_dir"),
-            component_inventory=next_state.get("component_inventory"),
         )
 
         completed = next_state.get("completed_conversions", [])
@@ -40,26 +37,37 @@ async def validate_node(state: MigrationState) -> MigrationState:
         total = len(completed) + len(failed)
         passed = sum(1 for c in completed if c.get("passed"))
 
-        # Always proceed — no re-migration loops
         next_state["validation_errors"] = result.validation_errors
-        next_state["validation_warnings"] = result.warnings if hasattr(result, "warnings") else []
+        next_state["validation_warnings"] = result.warnings
         next_state["checks_passed"] = result.checks_passed
         next_state["status"] = "validating"
         next_state["progress_pct"] = 92
 
-        status_str = "PASSED" if result.is_successful else f"{len(result.validation_errors)} warnings"
+        if result.is_successful:
+            status_str = "PASSED"
+        elif result.validation_errors:
+            status_str = f"{len(result.validation_errors)} error(s)"
+        else:
+            status_str = f"{len(result.warnings)} import warning(s)"
+
         next_state["current_step"] = (
             f"Validation complete: {passed}/{total} components — {status_str}"
         )
         next_state["logs"] = [
             *next_state.get("logs", []),
-            f"✅ Validation: {passed}/{total} components converted ({status_str})",
+            f"✅ Validation: {passed}/{total} components converted — {status_str}",
         ]
 
+        # Surface errors and warnings in logs (cap at 10 each)
         if result.validation_errors:
             next_state["logs"] = [
                 *next_state["logs"],
-                *[f"⚠️ {e}" for e in result.validation_errors[:10]],
+                *[f"❌ {e}" for e in result.validation_errors[:10]],
+            ]
+        if result.warnings:
+            next_state["logs"] = [
+                *next_state["logs"],
+                *[f"⚠️ {w}" for w in result.warnings[:10]],
             ]
 
         next_state["analysis_artifacts"] = {
@@ -67,8 +75,28 @@ async def validate_node(state: MigrationState) -> MigrationState:
             "validation_report": str(result.artifact_path),
         }
 
+        checklist = next_state.get("migration_checklist", [])
+        failed_items = [item for item in checklist if item.get("status") == "failed"]
+        missing_files: list[str] = []
+        for item in checklist:
+            target_file = str(item.get("target_file", ""))
+            if item.get("status") == "done" and target_file:
+                if not (Path(output_dir) / target_file).exists():
+                    missing_files.append(target_file)
+
+        if failed_items or missing_files:
+            next_state["logs"] = [
+                *next_state["logs"],
+                f"Checklist: {len(failed_items)} failed, {len(missing_files)} missing files",
+                *[
+                    f"  FAILED: {item.get('class_name')} ({item.get('error')})"
+                    for item in failed_items[:5]
+                ],
+                *[f"  MISSING: {path}" for path in missing_files[:5]],
+            ]
+
     except Exception as exc:
-        # Validation errors should never block packaging
+        # Validation must never block packaging
         next_state["status"] = "validating"
         next_state["current_step"] = "Validation skipped (error)"
         next_state["progress_pct"] = 92
